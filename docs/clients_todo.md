@@ -140,6 +140,16 @@
 
 ## Later
 
+### Server Install Defects
+
+- Fix install-method drift during bootstrap:
+  - if the user selects `docker` for a new server, the onboarding pipeline must not silently finish with detected `go`
+  - current defect: a server added with `docker` selected can end up installed/detected as `go-userspace`
+  - expected behavior:
+    - either enforce the selected install method
+    - or stop with a clear error/status instead of silently switching runtime type
+  - priority: tertiary / low, but must be fixed before the install wizard is considered reliable
+
 ### Speed Limits
 
 - Implement per-peer bandwidth limits for docker-installed AWG servers.

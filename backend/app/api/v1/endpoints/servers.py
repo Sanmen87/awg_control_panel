@@ -13,7 +13,7 @@ from app.models.topology import Topology
 from app.models.topology_node import TopologyNode
 from app.models.user import User
 from app.schemas.job import DeploymentJobRead
-from app.schemas.server import ServerCreate, ServerRead, ServerUpdate
+from app.schemas.server import ServerBootstrapRequest, ServerCreate, ServerRead, ServerUpdate
 from app.services.awg_detection import DETECT_AWG_COMMAND, parse_detection_output
 from app.services.audit import AuditService
 from app.services.bootstrap_commands import CHECK_SERVER_COMMAND
@@ -238,12 +238,22 @@ def detect_awg(
 @router.post("/{server_id}/bootstrap", response_model=DeploymentJobRead, status_code=status.HTTP_202_ACCEPTED)
 def bootstrap_server(
     server_id: int,
+    payload: ServerBootstrapRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> DeploymentJob:
     server = db.query(Server).filter(Server.id == server_id).first()
     if not server:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+
+    requested_install_method = payload.install_method if payload else None
+    if requested_install_method is not None:
+        if requested_install_method not in {InstallMethod.DOCKER, InstallMethod.GO, InstallMethod.NATIVE}:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Bootstrap install method must be docker or go")
+        server.install_method = InstallMethod.GO if requested_install_method == InstallMethod.NATIVE else requested_install_method
+        db.add(server)
+        db.commit()
+        db.refresh(server)
 
     job = DeploymentJob(
         job_type=JobType.BOOTSTRAP_SERVER,

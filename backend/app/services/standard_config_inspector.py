@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from shlex import quote
 
 from app.models.server import Server
+from app.services.bootstrap_commands import wrap_with_optional_sudo
 from app.services.server_credentials import ServerCredentialsService
+from app.services.server_runtime_paths import (
+    build_read_clients_table_command,
+    build_show_dump_command,
+    get_docker_container,
+    parse_runtime_details,
+)
 from app.services.ssh import SSHService
 
 INSPECT_STANDARD_CONFIG_COMMAND = r"""
@@ -204,7 +211,10 @@ class StandardConfigInspector:
         if runtime == "docker" and docker_container:
             command = f"docker exec {quote(docker_container)} sh -lc 'cat {quote(config_path)} 2>/dev/null || true'"
         else:
-            command = f"cat {quote(config_path)} 2>/dev/null || true"
+            command = wrap_with_optional_sudo(
+                f"cat {quote(config_path)} 2>/dev/null || true",
+                self.credentials.get_sudo_password(server),
+            )
         return (await self._run(server, command)).strip()
 
     async def _fetch_peer_dump(
@@ -214,17 +224,10 @@ class StandardConfigInspector:
         runtime: str,
         docker_container: str | None,
     ) -> str:
-        if runtime == "docker" and docker_container:
-            command = (
-                f"docker exec {quote(docker_container)} sh -lc "
-                "'if command -v awg >/dev/null 2>&1; then awg show all dump; "
-                "elif command -v wg >/dev/null 2>&1; then wg show all dump; fi'"
-            )
-        else:
-            command = (
-                "sh -lc 'if command -v awg >/dev/null 2>&1; then awg show all dump; "
-                "elif command -v wg >/dev/null 2>&1; then wg show all dump; fi'"
-        )
+        runtime_details = parse_runtime_details(server)
+        command = build_show_dump_command(server, runtime_details)
+        if not get_docker_container(server, runtime_details):
+            command = wrap_with_optional_sudo(command, self.credentials.get_sudo_password(server))
         return (await self._run(server, command)).strip()
 
     async def _fetch_clients_table(
@@ -234,37 +237,37 @@ class StandardConfigInspector:
         runtime: str,
         docker_container: str | None,
     ) -> str:
-        if runtime == "docker" and docker_container:
-            command = (
-                f"docker exec {quote(docker_container)} sh -lc "
-                "'cat /opt/amnezia/awg/clientsTable 2>/dev/null || "
-                "cat /opt/amnezia/amneziawg/clientsTable 2>/dev/null || true'"
-            )
-        else:
-            command = (
-                "sh -lc 'cat /opt/amnezia/awg/clientsTable 2>/dev/null || "
-                "cat /opt/amnezia/amneziawg/clientsTable 2>/dev/null || true'"
-            )
+        runtime_details = parse_runtime_details(server)
+        command = build_read_clients_table_command(server, runtime_details)
+        if not get_docker_container(server, runtime_details):
+            command = wrap_with_optional_sudo(command, self.credentials.get_sudo_password(server))
         return (await self._run(server, command)).strip()
 
     def _parse_peer_dump(self, dump: str) -> list[dict[str, str]]:
         peers: list[dict[str, str]] = []
         for raw_line in dump.splitlines():
-            parts = raw_line.strip().split("\t")
-            if len(parts) < 8:
+            line = raw_line.strip()
+            if not line:
                 continue
-            public_key = parts[0].strip()
-            if not public_key or public_key == "private_key":
+            parts = line.split("\t")
+            if len(parts) < 8:
+                parts = re.split(r"\s+", line)
+            if len(parts) == 5:
+                continue
+            if len(parts) < 9:
+                continue
+            public_key = parts[1].strip()
+            if not public_key:
                 continue
             peers.append(
                 {
                     "public_key": public_key,
-                    "allowed_ips": parts[3].strip(),
-                    "endpoint": parts[2].strip(),
-                    "latest_handshake": parts[4].strip(),
-                    "transfer_rx": parts[5].strip(),
-                    "transfer_tx": parts[6].strip(),
-                    "persistent_keepalive": parts[7].strip(),
+                    "allowed_ips": parts[4].strip(),
+                    "endpoint": parts[3].strip(),
+                    "latest_handshake": parts[5].strip(),
+                    "transfer_rx": parts[6].strip(),
+                    "transfer_tx": parts[7].strip(),
+                    "persistent_keepalive": parts[8].strip(),
                 }
             )
         return peers

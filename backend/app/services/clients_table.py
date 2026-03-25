@@ -12,6 +12,14 @@ from sqlalchemy.orm import Session
 from app.models.client import Client
 from app.models.client_runtime_sample import ClientRuntimeSample
 from app.models.server import Server
+from app.services.bootstrap_commands import wrap_with_optional_sudo
+from app.services.server_runtime_paths import (
+    build_read_clients_table_command,
+    build_show_dump_command,
+    get_docker_container,
+    get_primary_clients_table_path,
+    parse_runtime_details,
+)
 from app.services.server_credentials import ServerCredentialsService
 from app.services.ssh import SSHService
 
@@ -52,25 +60,10 @@ class ClientsTableService:
         return json.dumps(payload, ensure_ascii=False, indent=4)
 
     async def fetch_existing(self, server: Server) -> str:
-        runtime_details: dict[str, object] = {}
-        if server.live_runtime_details_json:
-            try:
-                runtime_details = json.loads(server.live_runtime_details_json)
-            except json.JSONDecodeError:
-                runtime_details = {}
-
-        docker_container = runtime_details.get("docker_container")
-        if server.install_method.value == "docker" and isinstance(docker_container, str) and docker_container:
-            command = (
-                f"docker exec {shlex.quote(docker_container)} sh -lc "
-                "'cat /opt/amnezia/awg/clientsTable 2>/dev/null || "
-                "cat /opt/amnezia/amneziawg/clientsTable 2>/dev/null || true'"
-            )
-        else:
-            command = (
-                "sh -lc 'cat /opt/amnezia/awg/clientsTable 2>/dev/null || "
-                "cat /opt/amnezia/amneziawg/clientsTable 2>/dev/null || true'"
-            )
+        runtime_details = parse_runtime_details(server)
+        command = build_read_clients_table_command(server, runtime_details)
+        if not get_docker_container(server, runtime_details):
+            command = wrap_with_optional_sudo(command, self.credentials.get_sudo_password(server))
 
         result = await self.ssh.run_command(
             host=server.host,
@@ -242,15 +235,10 @@ class ClientsTableService:
     async def upload(self, server: Server, content: str) -> None:
         password = self.credentials.get_ssh_password(server)
         private_key = self.credentials.get_private_key(server)
-        runtime_details: dict[str, object] = {}
-        if server.live_runtime_details_json:
-            try:
-                runtime_details = json.loads(server.live_runtime_details_json)
-            except json.JSONDecodeError:
-                runtime_details = {}
-
-        docker_container = runtime_details.get("docker_container")
-        remote_path = "/opt/amnezia/awg/clientsTable"
+        sudo_password = self.credentials.get_sudo_password(server)
+        runtime_details = parse_runtime_details(server)
+        docker_container = get_docker_container(server, runtime_details)
+        remote_path = get_primary_clients_table_path(server, runtime_details)
         temp_remote = "/tmp/clientsTable"
 
         await self.ssh.upload_text_file(
@@ -263,7 +251,7 @@ class ClientsTableService:
             content=content,
         )
 
-        if server.install_method.value == "docker" and isinstance(docker_container, str) and docker_container:
+        if docker_container:
             command = (
                 "set -e && "
                 f"docker cp {shlex.quote(temp_remote)} {shlex.quote(docker_container)}:{shlex.quote(remote_path)} && "
@@ -271,11 +259,13 @@ class ClientsTableService:
                 f"rm -f {shlex.quote(temp_remote)}"
             )
         else:
-            command = (
+            remote_dir = remote_path.rsplit("/", 1)[0] if "/" in remote_path else "/etc/amnezia/amneziawg"
+            command = wrap_with_optional_sudo(
                 "set -e && "
-                f"mkdir -p {shlex.quote('/opt/amnezia/awg')} && "
+                f"mkdir -p {shlex.quote(remote_dir)} && "
                 f"mv {shlex.quote(temp_remote)} {shlex.quote(remote_path)} && "
-                f"chmod 600 {shlex.quote(remote_path)}"
+                f"chmod 600 {shlex.quote(remote_path)}",
+                sudo_password,
             )
 
         result = await self.ssh.run_command(
@@ -318,25 +308,10 @@ class ClientsTableService:
         return result
 
     async def _fetch_runtime_stats(self, server: Server) -> dict[str, dict[str, str | int]]:
-        runtime_details: dict[str, object] = {}
-        if server.live_runtime_details_json:
-            try:
-                runtime_details = json.loads(server.live_runtime_details_json)
-            except json.JSONDecodeError:
-                runtime_details = {}
-
-        docker_container = runtime_details.get("docker_container")
-        if server.install_method.value == "docker" and isinstance(docker_container, str) and docker_container:
-            command = (
-                f"docker exec {shlex.quote(docker_container)} sh -lc "
-                "'if command -v awg >/dev/null 2>&1; then awg show all dump; "
-                "elif command -v wg >/dev/null 2>&1; then wg show all dump; fi'"
-            )
-        else:
-            command = (
-                "sh -lc 'if command -v awg >/dev/null 2>&1; then awg show all dump; "
-                "elif command -v wg >/dev/null 2>&1; then wg show all dump; fi'"
-            )
+        runtime_details = parse_runtime_details(server)
+        command = build_show_dump_command(server, runtime_details)
+        if not get_docker_container(server, runtime_details):
+            command = wrap_with_optional_sudo(command, self.credentials.get_sudo_password(server))
 
         result = await self.ssh.run_command(
             host=server.host,

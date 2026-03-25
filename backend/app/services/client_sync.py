@@ -22,7 +22,7 @@ class ClientSyncService:
         self.clients_table = ClientsTableService()
 
     def apply_server_clients(self, db: Session, server: Server) -> None:
-        if server.config_source != "imported" or not server.live_runtime_details_json:
+        if not server.live_runtime_details_json:
             return
 
         standard_node = (
@@ -55,6 +55,12 @@ class ClientSyncService:
             .all()
         )
         merged = self.adopter.render(server, active_clients, live_config)
+        runtime_details["config_preview"] = merged
+        runtime_details["config_path"] = server.live_config_path
+        runtime_details["peer_count"] = str(merged.count("[Peer]"))
+        server.live_runtime_details_json = json.dumps(runtime_details)
+        server.live_peer_count = merged.count("[Peer]")
+        db.add(server)
         rendered = RenderedConfig(
             server_id=server.id,
             interface_name=server.live_interface_name or "wg0",

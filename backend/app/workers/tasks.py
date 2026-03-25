@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from pathlib import Path
 import tarfile
 from datetime import UTC, datetime
@@ -11,7 +12,7 @@ from app.models.client import Client
 from app.db.session import SessionLocal
 from app.models.job import DeploymentJob, JobStatus
 from app.models.server import AWGStatus, AccessStatus, InstallMethod, Server, ServerStatus
-from app.models.topology import Topology, TopologyStatus
+from app.models.topology import Topology, TopologyStatus, TopologyType
 from app.models.topology_node import TopologyNode
 from app.services.awg_detection import DETECT_AWG_COMMAND, parse_detection_output
 from app.services.bootstrap_commands import (
@@ -28,6 +29,41 @@ from app.services.ssh import SSHService
 from app.services.topology_deployer import deploy_topology_sync
 from app.services.topology_renderer import TopologyRenderer
 from app.workers.celery_app import celery_app
+
+
+def _extract_rendered_config_value(content: str, key: str) -> str | None:
+    pattern = rf"^{re.escape(key)}\s*=\s*(.+)$"
+    match = re.search(pattern, content, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def _persist_generated_standard_server_state(db: Session, topology: Topology | None, rendered_files: list) -> None:
+    if not topology or topology.type != TopologyType.STANDARD:
+        return
+    for rendered in rendered_files:
+        server = db.query(Server).filter(Server.id == rendered.server_id).first()
+        if not server or server.config_source == "imported":
+            continue
+        try:
+            runtime_details = json.loads(server.live_runtime_details_json) if server.live_runtime_details_json else {}
+        except json.JSONDecodeError:
+            runtime_details = {}
+        if not isinstance(runtime_details, dict):
+            runtime_details = {}
+
+        runtime_details["config_preview"] = rendered.content
+        runtime_details["config_path"] = rendered.remote_path
+        runtime_details["peer_count"] = str(rendered.content.count("[Peer]"))
+
+        server.config_source = "generated"
+        server.live_interface_name = rendered.interface_name
+        server.live_config_path = rendered.remote_path
+        server.live_address_cidr = _extract_rendered_config_value(rendered.content, "Address")
+        listen_port_raw = _extract_rendered_config_value(rendered.content, "ListenPort")
+        server.live_listen_port = int(listen_port_raw) if listen_port_raw and listen_port_raw.isdigit() else None
+        server.live_peer_count = rendered.content.count("[Peer]")
+        server.live_runtime_details_json = json.dumps(runtime_details)
+        db.add(server)
 
 
 def _update_job(job_id: int, *, status: JobStatus, result_message: str) -> None:
@@ -220,6 +256,7 @@ def deploy_topology(job_id: int) -> None:
         db.commit()
 
         rendered_files = deploy_topology_sync(topology, nodes, servers_by_id, clients)
+        _persist_generated_standard_server_state(db, topology, rendered_files)
         result_lines = [f"{item.remote_path}: {len(item.content.splitlines())} lines" for item in rendered_files]
 
         job.status = JobStatus.SUCCEEDED
@@ -378,7 +415,7 @@ def sync_client_runtime_stats() -> None:
             db.query(Server)
             .filter(
                 Server.awg_detected.is_(True),
-                Server.config_source == "imported",
+                Server.live_runtime_details_json.is_not(None),
             )
             .all()
         )

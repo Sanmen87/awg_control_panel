@@ -16,25 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 from app.core.security import decrypt_value, encrypt_value
 from app.models.client import Client
 from app.models.server import Server
-
-AWG_INTERFACE_FIELD_ORDER = [
-    "Jc",
-    "Jmin",
-    "Jmax",
-    "S1",
-    "S2",
-    "S3",
-    "S4",
-    "H1",
-    "H2",
-    "H3",
-    "H4",
-    "I1",
-    "I2",
-    "I3",
-    "I4",
-    "I5",
-]
+from app.services.awg_profile import AWG_PROFILE_FIELD_ORDER, AWGProfileService
 
 
 @dataclass
@@ -51,6 +33,9 @@ class GeneratedClientMaterials:
 
 
 class ClientMaterialsService:
+    def __init__(self) -> None:
+        self.awg_profile = AWGProfileService()
+
     def build_for_server(self, server: Server, name: str, assigned_ip: str, existing_psk: str | None = None) -> GeneratedClientMaterials:
         private_key, public_key = self._generate_keypair()
         preshared_key = existing_psk or self._generate_psk()
@@ -100,8 +85,10 @@ class ClientMaterialsService:
     def next_available_ip(self, server: Server, existing_assigned_ips: list[str]) -> str:
         if not server.live_address_cidr:
             raise RuntimeError("Server subnet is unknown")
-        network = ipaddress.ip_network(server.live_address_cidr, strict=False)
+        interface = ipaddress.ip_interface(server.live_address_cidr)
+        network = interface.network
         occupied = set()
+        occupied.add(str(interface.ip))
         for item in existing_assigned_ips:
             try:
                 occupied.add(str(ipaddress.ip_interface(item).ip))
@@ -178,6 +165,9 @@ class ClientMaterialsService:
         return base64.b64encode(public_raw).decode("utf-8")
 
     def _server_dns(self, server: Server) -> str:
+        install_method = getattr(getattr(server, "install_method", None), "value", None)
+        if install_method in {"go", "native"}:
+            return "1.1.1.1, 1.0.0.1"
         try:
             interface = ipaddress.ip_interface(server.live_address_cidr or "")
             return str(interface.ip)
@@ -203,7 +193,7 @@ class ClientMaterialsService:
             f"PrivateKey = {private_key}",
             f"DNS = {dns_value}",
         ]
-        for key in AWG_INTERFACE_FIELD_ORDER:
+        for key in AWG_PROFILE_FIELD_ORDER:
             value = (extra_interface_fields or {}).get(key)
             if value:
                 lines.append(f"{key} = {value}")
@@ -222,7 +212,7 @@ class ClientMaterialsService:
 
     def _extract_obfuscation_fields(self, server: Server) -> dict[str, str]:
         if not server.live_runtime_details_json:
-            return {}
+            return self.awg_profile.for_generated_server(server)
         runtime_details = json.loads(server.live_runtime_details_json)
         config_preview = runtime_details.get("config_preview") or ""
         fields: dict[str, str] = {}
@@ -237,9 +227,12 @@ class ClientMaterialsService:
                 continue
             key, value = candidate.split("=", 1)
             normalized_key = key.strip()
-            if normalized_key in AWG_INTERFACE_FIELD_ORDER:
+            if normalized_key in AWG_PROFILE_FIELD_ORDER:
                 fields[normalized_key] = value.strip()
-        return fields
+        normalized = self.awg_profile.normalize(fields)
+        if normalized:
+            return normalized
+        return self.awg_profile.for_generated_server(server)
 
     def _build_amneziavpn_payload(
         self,
@@ -316,7 +309,7 @@ class ClientMaterialsService:
             "persistent_keep_alive": "25",
             "allowed_ips": ["0.0.0.0/0", "::/0"],
         }
-        for key in AWG_INTERFACE_FIELD_ORDER:
+        for key in AWG_PROFILE_FIELD_ORDER:
             value = obfuscation_fields.get(key)
             if value:
                 config[key] = value

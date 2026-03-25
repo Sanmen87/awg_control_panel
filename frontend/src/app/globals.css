@@ -521,6 +521,17 @@ a {
   padding-right: 108px;
 }
 
+.page-header-with-fixed-action {
+  padding-right: 216px;
+}
+
+.page-action-fixed {
+  position: absolute;
+  top: 8px;
+  right: 98px;
+  z-index: 5;
+}
+
 .content-grid {
   display: grid;
   grid-template-columns: minmax(320px, 420px) 1fr;
@@ -678,6 +689,28 @@ a {
 .compact-action-row {
   margin-top: 0;
   justify-content: flex-end;
+}
+
+.server-install-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(200px, 260px) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.server-install-grid p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.server-bootstrap-status {
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.server-bootstrap-status .log-box {
+  margin-top: 0;
 }
 
 .field-action {

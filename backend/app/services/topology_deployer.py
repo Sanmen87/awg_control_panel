@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
+import re
 import shlex
 from datetime import UTC, datetime
 
 from app.models.client import Client
-from app.models.server import Server
+from app.models.server import Server, ServerRole
 from app.models.topology import Topology, TopologyType
 from app.models.topology_node import TopologyNode, TopologyNodeRole
 from app.services.bootstrap_commands import wrap_with_optional_sudo
@@ -29,6 +31,33 @@ class TopologyDeployer:
         self.ssh = SSHService()
         self.credentials = ServerCredentialsService()
         self.adopter = StandardConfigAdopter()
+
+    def _extract_config_value(self, content: str, key: str) -> str | None:
+        match = re.search(rf"^{re.escape(key)}\s*=\s*(.+)$", content, re.MULTILINE)
+        return match.group(1).strip() if match else None
+
+    def _build_native_nat_commands(self, server: Server, config: RenderedConfig) -> list[str]:
+        if server.role != ServerRole.STANDARD_VPN:
+            return []
+
+        address = self._extract_config_value(config.content, "Address")
+        if not address:
+            return []
+
+        try:
+            network_cidr = str(ipaddress.ip_interface(address).network)
+        except ValueError:
+            return []
+
+        interface = shlex.quote(config.interface_name)
+        network = shlex.quote(network_cidr)
+        return [
+            'UPLINK_IFACE="$(ip route show default 2>/dev/null | awk \'/default/ {print $5; exit}\')"',
+            'if [ -z "${UPLINK_IFACE:-}" ]; then UPLINK_IFACE="$(ip -o route get 1.1.1.1 2>/dev/null | awk \'{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}\')"; fi',
+            f'if command -v iptables >/dev/null 2>&1 && [ -n "${{UPLINK_IFACE:-}}" ]; then iptables -t nat -C POSTROUTING -s {network} -o "$UPLINK_IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {network} -o "$UPLINK_IFACE" -j MASQUERADE; fi',
+            f'if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -i {interface} -j ACCEPT 2>/dev/null || iptables -A FORWARD -i {interface} -j ACCEPT; fi',
+            f'if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -o {interface} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -o {interface} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; fi',
+        ]
 
     async def generate_keypair(self, server: Server) -> tuple[str, str]:
         result = await self.ssh.run_command(
@@ -86,6 +115,7 @@ class TopologyDeployer:
                     "sysctl -w net.ipv4.ip_forward=1",
                     f"awg-quick down {interface} || true",
                     f"awg-quick up {interface}",
+                    *self._build_native_nat_commands(server, config),
                 ]
             ),
             sudo_password,
@@ -108,6 +138,7 @@ class TopologyDeployer:
     ) -> None:
         password = self.credentials.get_ssh_password(server)
         private_key = self.credentials.get_private_key(server)
+        sudo_password = self.credentials.get_sudo_password(server)
         docker_container = None
         if server.live_runtime_details_json:
             try:
@@ -148,14 +179,19 @@ class TopologyDeployer:
             directory = shlex.quote(str(config.remote_path.rsplit('/', 1)[0] if '/' in config.remote_path else "/etc/amnezia/amneziawg"))
             remote_path = shlex.quote(config.remote_path)
             interface = shlex.quote(config.interface_name)
-            apply_command = (
-                "set -e && "
-                f"mkdir -p {directory} && "
-                f"cp {remote_path} {remote_path}.bak.{backup_suffix} 2>/dev/null || true && "
-                f"mv {shlex.quote(temp_remote)} {remote_path} && "
-                f"chmod 600 {remote_path} && "
-                f"(awg-quick down {interface} || wg-quick down {interface} || true) && "
-                f"(awg-quick up {interface} || wg-quick up {interface})"
+            native_steps = [
+                "set -e",
+                f"mkdir -p {directory}",
+                f"cp {remote_path} {remote_path}.bak.{backup_suffix} 2>/dev/null || true",
+                f"mv {shlex.quote(temp_remote)} {remote_path}",
+                f"chmod 600 {remote_path}",
+                f"(awg-quick down {interface} || wg-quick down {interface} || true)",
+                f"(awg-quick up {interface} || wg-quick up {interface})",
+                *self._build_native_nat_commands(server, config),
+            ]
+            apply_command = wrap_with_optional_sudo(
+                " && ".join(native_steps),
+                sudo_password,
             )
 
         result = await self.ssh.run_command(

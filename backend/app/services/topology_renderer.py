@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import x25519
 
 from app.models.topology import Topology, TopologyType
 from app.models.topology_node import TopologyNode, TopologyNodeRole
+from app.services.awg_profile import AWGProfileService
 from app.services.awg_templates import render_link_config, render_standard_server_config
 
 
@@ -20,6 +25,22 @@ class RenderedConfig:
 
 
 class TopologyRenderer:
+    def __init__(self) -> None:
+        self.awg_profile = AWGProfileService()
+
+    def _generate_preview_keypair(self) -> tuple[str, str]:
+        private = x25519.X25519PrivateKey.generate()
+        private_raw = private.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        public_raw = private.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        return base64.b64encode(private_raw).decode("utf-8"), base64.b64encode(public_raw).decode("utf-8")
+
     def render(
         self,
         topology: Topology,
@@ -56,7 +77,8 @@ class TopologyRenderer:
             if key_provider:
                 private_key, *_rest = key_provider(standard_server.id, standard_server.id, "awg0")
             else:
-                private_key = "REPLACE_STANDARD_PRIVATE_KEY"
+                private_key, _preview_public_key = self._generate_preview_keypair()
+            obfuscation_fields = self.awg_profile.for_generated_server(standard_server)
 
             return [
                 RenderedConfig(
@@ -68,6 +90,7 @@ class TopologyRenderer:
                         interface_name="awg0",
                         address="10.100.0.1/24",
                         private_key=private_key,
+                        extra_interface_fields=obfuscation_fields,
                     ),
                 )
             ]
@@ -90,6 +113,7 @@ class TopologyRenderer:
             interface_name = f"awg{node.priority}"
             proxy_address = f"10.200.{node.priority}.1/30"
             exit_address = f"10.200.{node.priority}.2/30"
+            obfuscation_fields = self.awg_profile.for_generated_server(proxy_server)
 
             if key_provider:
                 proxy_private_key, proxy_public_key, exit_private_key, exit_public_key = key_provider(
@@ -98,10 +122,8 @@ class TopologyRenderer:
                     interface_name,
                 )
             else:
-                proxy_private_key = "REPLACE_PROXY_PRIVATE_KEY"
-                proxy_public_key = "REPLACE_PROXY_PUBLIC_KEY"
-                exit_private_key = "REPLACE_EXIT_PRIVATE_KEY"
-                exit_public_key = "REPLACE_EXIT_PUBLIC_KEY"
+                proxy_private_key, proxy_public_key = self._generate_preview_keypair()
+                exit_private_key, exit_public_key = self._generate_preview_keypair()
 
             rendered.append(
                 RenderedConfig(
@@ -117,6 +139,7 @@ class TopologyRenderer:
                         peer_public_key=exit_public_key,
                         endpoint=f"{exit_server.host}:51820",
                         allowed_ips=f"10.200.{node.priority}.2/32",
+                        extra_interface_fields=obfuscation_fields,
                     ),
                 )
             )
@@ -134,6 +157,7 @@ class TopologyRenderer:
                         peer_public_key=proxy_public_key,
                         endpoint=f"{proxy_server.host}:51820",
                         allowed_ips="10.100.0.0/24,10.200.0.0/16",
+                        extra_interface_fields=obfuscation_fields,
                     ),
                 )
             )

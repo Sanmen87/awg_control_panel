@@ -1,4 +1,6 @@
 import asyncio
+import json
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -26,8 +28,75 @@ from app.services.client_import import ClientImportService
 from app.services.client_materials import ClientMaterialsService
 from app.services.client_sync import ClientSyncService
 from app.services.delivery import DeliveryService
+from app.services.standard_config_inspector import StandardConfigInspector
 
 router = APIRouter()
+
+
+def _extract_config_value(config_text: str, key: str) -> str | None:
+    match = re.search(rf"^{re.escape(key)}\s*=\s*(.+)$", config_text, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def _hydrate_server_live_state_from_preview(db: Session, server: Server) -> Server:
+    if not server.live_runtime_details_json:
+        return server
+    try:
+        runtime_details = json.loads(server.live_runtime_details_json)
+    except json.JSONDecodeError:
+        return server
+    if not isinstance(runtime_details, dict):
+        return server
+    config_preview = runtime_details.get("config_preview")
+    if not isinstance(config_preview, str) or not config_preview.strip():
+        return server
+
+    updated = False
+    if not server.live_address_cidr:
+        address = _extract_config_value(config_preview, "Address")
+        if address:
+            server.live_address_cidr = address
+            updated = True
+    if server.live_listen_port is None:
+        listen_port = _extract_config_value(config_preview, "ListenPort")
+        if listen_port and listen_port.isdigit():
+            server.live_listen_port = int(listen_port)
+            updated = True
+    if not server.live_interface_name:
+        interface_name = runtime_details.get("interface") or runtime_details.get("live_interface_name")
+        if isinstance(interface_name, str) and interface_name.strip():
+            server.live_interface_name = interface_name.strip()
+            updated = True
+    if not server.live_config_path:
+        config_path = runtime_details.get("config_path")
+        if isinstance(config_path, str) and config_path.strip():
+            server.live_config_path = config_path.strip()
+            updated = True
+    if updated:
+        db.add(server)
+        db.commit()
+        db.refresh(server)
+    return server
+
+
+def _hydrate_server_live_state_from_remote(db: Session, server: Server) -> Server:
+    if not server.awg_detected:
+        return server
+    if server.access_status.value != "ok":
+        return server
+
+    inspection = asyncio.run(StandardConfigInspector().inspect(server))
+    server.config_source = "imported" if inspection.interface or inspection.listen_port or inspection.peer_count else "generated"
+    server.live_interface_name = inspection.interface or server.live_interface_name or "awg0"
+    server.live_config_path = inspection.config_path or server.live_config_path
+    server.live_address_cidr = inspection.address_cidr or server.live_address_cidr
+    server.live_listen_port = inspection.listen_port if inspection.listen_port is not None else server.live_listen_port
+    server.live_peer_count = inspection.peer_count
+    server.live_runtime_details_json = inspection.raw_json or server.live_runtime_details_json
+    db.add(server)
+    db.commit()
+    db.refresh(server)
+    return server
 
 
 def _format_quiet_time(value: int | None) -> str | None:
@@ -121,64 +190,78 @@ def create_managed_client(
     server = db.query(Server).filter(Server.id == payload.server_id).first()
     if not server:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
-    if not server.awg_detected or not server.live_address_cidr:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Server is not ready for managed clients")
-
-    existing_clients = db.query(Client).filter(Client.server_id == server.id).all()
-    existing_clients = [client for client in existing_clients if not client.archived]
-    existing_ips = [client.assigned_ip for client in existing_clients]
-    materials_service = ClientMaterialsService()
-    assigned_ip = materials_service.next_available_ip(server, existing_ips)
-    existing_psk = None
-    for existing in existing_clients:
-        if existing.preshared_key_encrypted:
-            existing_psk = decrypt_value(existing.preshared_key_encrypted)
-            break
-    materials = materials_service.build_for_server(server, payload.name, assigned_ip, existing_psk=existing_psk)
-
-    client = Client(
-        name=payload.name,
-        public_key=materials.public_key,
-        private_key_encrypted=encrypt_value(materials.private_key),
-        preshared_key_encrypted=encrypt_value(materials.preshared_key),
-        assigned_ip=materials.assigned_ip,
-        status="active",
-        archived=False,
-        manual_disabled=False,
-        source=ClientSource.GENERATED,
-        server_id=server.id,
-        topology_id=payload.topology_id,
-        import_note=payload.import_note,
-        expires_at=payload.expires_at,
-        quiet_hours_start_minute=_parse_quiet_time(payload.quiet_hours_start),
-        quiet_hours_end_minute=_parse_quiet_time(payload.quiet_hours_end),
-        quiet_hours_timezone=(payload.quiet_hours_timezone or "").strip() or None,
-        traffic_limit_mb=payload.traffic_limit_mb,
-        config_ubuntu_encrypted=materials_service.encrypt_material(materials.ubuntu_config),
-        config_amneziawg_encrypted=materials_service.encrypt_material(materials.amneziawg_config),
-        config_amneziavpn_encrypted=materials_service.encrypt_material(materials.amneziavpn_config),
-        qr_png_base64_encrypted=materials_service.encrypt_qr_material(materials.qr_png_base64_list),
-    )
-    db.add(client)
-    db.commit()
-    db.refresh(client)
-
-    if client.topology_id is None:
-        standard_node = (
-            db.query(TopologyNode)
-            .filter(
-                TopologyNode.server_id == server.id,
-                TopologyNode.role == TopologyNodeRole.STANDARD_VPN,
-            )
-            .first()
+    server = _hydrate_server_live_state_from_preview(db, server)
+    if server.awg_detected and (not server.live_runtime_details_json or not server.live_address_cidr):
+        try:
+            server = _hydrate_server_live_state_from_remote(db, server)
+        except Exception:
+            pass
+    if not server.awg_detected or not server.live_runtime_details_json or not server.live_address_cidr:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Server is not ready for managed clients. Prepare the server and deploy or import the live config first.",
         )
-        if standard_node:
-            client.topology_id = standard_node.topology_id
-            db.add(client)
-            db.commit()
-            db.refresh(client)
 
-    ClientSyncService().apply_server_clients(db, server)
+    try:
+        existing_clients = db.query(Client).filter(Client.server_id == server.id).all()
+        existing_clients = [client for client in existing_clients if not client.archived]
+        existing_ips = [client.assigned_ip for client in existing_clients]
+        materials_service = ClientMaterialsService()
+        assigned_ip = materials_service.next_available_ip(server, existing_ips)
+        existing_psk = None
+        for existing in existing_clients:
+            if existing.preshared_key_encrypted:
+                existing_psk = decrypt_value(existing.preshared_key_encrypted)
+                break
+        materials = materials_service.build_for_server(server, payload.name, assigned_ip, existing_psk=existing_psk)
+
+        client = Client(
+            name=payload.name,
+            public_key=materials.public_key,
+            private_key_encrypted=encrypt_value(materials.private_key),
+            preshared_key_encrypted=encrypt_value(materials.preshared_key),
+            assigned_ip=materials.assigned_ip,
+            status="active",
+            archived=False,
+            manual_disabled=False,
+            source=ClientSource.GENERATED,
+            server_id=server.id,
+            topology_id=payload.topology_id,
+            import_note=payload.import_note,
+            expires_at=payload.expires_at,
+            quiet_hours_start_minute=_parse_quiet_time(payload.quiet_hours_start),
+            quiet_hours_end_minute=_parse_quiet_time(payload.quiet_hours_end),
+            quiet_hours_timezone=(payload.quiet_hours_timezone or "").strip() or None,
+            traffic_limit_mb=payload.traffic_limit_mb,
+            config_ubuntu_encrypted=materials_service.encrypt_material(materials.ubuntu_config),
+            config_amneziawg_encrypted=materials_service.encrypt_material(materials.amneziawg_config),
+            config_amneziavpn_encrypted=materials_service.encrypt_material(materials.amneziavpn_config),
+            qr_png_base64_encrypted=materials_service.encrypt_qr_material(materials.qr_png_base64_list),
+        )
+        db.add(client)
+        db.flush()
+
+        if client.topology_id is None:
+            standard_node = (
+                db.query(TopologyNode)
+                .filter(
+                    TopologyNode.server_id == server.id,
+                    TopologyNode.role == TopologyNodeRole.STANDARD_VPN,
+                )
+                .first()
+            )
+            if standard_node:
+                client.topology_id = standard_node.topology_id
+                db.add(client)
+                db.flush()
+
+        ClientSyncService().apply_server_clients(db, server)
+        db.commit()
+        db.refresh(client)
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
     _decorate_client(client)
     AuditService().log(
         db,

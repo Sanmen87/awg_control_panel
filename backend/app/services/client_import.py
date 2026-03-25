@@ -3,13 +3,19 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from shlex import quote
 
 from sqlalchemy.orm import Session
 
 from app.models.client import Client, ClientSource
 from app.models.server import Server
+from app.services.bootstrap_commands import wrap_with_optional_sudo
 from app.services.server_credentials import ServerCredentialsService
+from app.services.server_runtime_paths import (
+    build_read_clients_table_command,
+    build_show_dump_command,
+    get_docker_container,
+    parse_runtime_details,
+)
 from app.services.ssh import SSHService
 
 IMPORT_PEERS_COMMAND = r"""
@@ -92,25 +98,10 @@ class ClientImportService:
         return result.stdout
 
     async def _fetch_clients_table(self, server: Server) -> str:
-        runtime_details: dict[str, object] = {}
-        if server.live_runtime_details_json:
-            try:
-                runtime_details = json.loads(server.live_runtime_details_json)
-            except json.JSONDecodeError:
-                runtime_details = {}
-
-        docker_container = runtime_details.get("docker_container")
-        if server.install_method.value == "docker" and isinstance(docker_container, str) and docker_container:
-            command = (
-                f"docker exec {quote(docker_container)} sh -lc "
-                "'cat /opt/amnezia/awg/clientsTable 2>/dev/null || "
-                "cat /opt/amnezia/amneziawg/clientsTable 2>/dev/null || true'"
-            )
-        else:
-            command = (
-                "sh -lc 'cat /opt/amnezia/awg/clientsTable 2>/dev/null || "
-                "cat /opt/amnezia/amneziawg/clientsTable 2>/dev/null || true'"
-            )
+        runtime_details = parse_runtime_details(server)
+        command = build_read_clients_table_command(server, runtime_details)
+        if not get_docker_container(server, runtime_details):
+            command = wrap_with_optional_sudo(command, self.credentials.get_sudo_password(server))
         return (await self._run(server, command)).strip()
 
     def _normalize_clients_table_records(self, raw_table: str) -> list[dict[str, str]]:
@@ -227,13 +218,17 @@ class ClientImportService:
         return merged
 
     async def fetch_peers(self, server: Server) -> list[dict[str, str]]:
+        runtime_details = parse_runtime_details(server)
+        command = build_show_dump_command(server, runtime_details)
+        if not get_docker_container(server, runtime_details):
+            command = wrap_with_optional_sudo(command, self.credentials.get_sudo_password(server))
         result = await self.ssh.run_command(
             host=server.host,
             username=server.ssh_user,
             port=server.ssh_port,
             password=self.credentials.get_ssh_password(server),
             private_key=self.credentials.get_private_key(server),
-            command=IMPORT_PEERS_COMMAND,
+            command=command,
         )
         if result.exit_status != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to import peers")

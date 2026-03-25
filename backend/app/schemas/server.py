@@ -30,6 +30,10 @@ class ServerUpdate(BaseModel):
     description: str | None = None
 
 
+class ServerBootstrapRequest(BaseModel):
+    install_method: InstallMethod | None = None
+
+
 class ServerRead(ServerBase):
     id: int
     name: str

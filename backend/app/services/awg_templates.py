@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.awg_profile import AWG_PROFILE_FIELD_ORDER
+
 
 def render_link_config(
     *,
@@ -11,21 +13,32 @@ def render_link_config(
     peer_public_key: str,
     endpoint: str,
     allowed_ips: str,
+    extra_interface_fields: dict[str, str] | None = None,
 ) -> str:
-    return (
-        "[Interface]\n"
-        f"# topology: {topology_name}\n"
-        f"# role: {role}\n"
-        f"Address = {local_address}\n"
-        "ListenPort = 51820\n"
-        f"PrivateKey = {private_key}\n\n"
-        "[Peer]\n"
-        f"# interface: {interface_name}\n"
-        f"PublicKey = {peer_public_key}\n"
-        f"Endpoint = {endpoint}\n"
-        f"AllowedIPs = {allowed_ips}\n"
-        "PersistentKeepalive = 25\n"
+    lines = [
+        "[Interface]",
+        f"# topology: {topology_name}",
+        f"# role: {role}",
+        f"Address = {local_address}",
+        "ListenPort = 51820",
+        f"PrivateKey = {private_key}",
+    ]
+    for key in AWG_PROFILE_FIELD_ORDER:
+        value = (extra_interface_fields or {}).get(key)
+        if value:
+            lines.append(f"{key} = {value}")
+    lines.extend(
+        [
+            "",
+            "[Peer]",
+            f"# interface: {interface_name}",
+            f"PublicKey = {peer_public_key}",
+            f"Endpoint = {endpoint}",
+            f"AllowedIPs = {allowed_ips}",
+            "PersistentKeepalive = 25",
+        ]
     )
+    return "\n".join(lines) + "\n"
 
 
 def render_standard_server_config(
@@ -35,12 +48,18 @@ def render_standard_server_config(
     address: str,
     private_key: str,
     listen_port: int = 51820,
+    extra_interface_fields: dict[str, str] | None = None,
 ) -> str:
-    return (
-        "[Interface]\n"
-        f"# topology: {topology_name}\n"
-        "# role: standard-vpn\n"
-        f"Address = {address}\n"
-        f"ListenPort = {listen_port}\n"
-        f"PrivateKey = {private_key}\n"
-    )
+    lines = [
+        "[Interface]",
+        f"# topology: {topology_name}",
+        "# role: standard-vpn",
+        f"Address = {address}",
+        f"ListenPort = {listen_port}",
+        f"PrivateKey = {private_key}",
+    ]
+    for key in AWG_PROFILE_FIELD_ORDER:
+        value = (extra_interface_fields or {}).get(key)
+        if value:
+            lines.append(f"{key} = {value}")
+    return "\n".join(lines) + "\n"

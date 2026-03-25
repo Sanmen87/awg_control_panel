@@ -55,12 +55,21 @@ type ServerMetadata = {
   geo_error?: string;
 };
 
+type Job = {
+  id: number;
+  job_type: string;
+  status: string;
+  server_id: number | null;
+  result_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 const initialForm = {
   name: "",
   host: "",
   ssh_port: 22,
   ssh_user: "root",
-  install_method: "docker",
   auth_method: "password",
   ssh_password: "",
   ssh_private_key: "",
@@ -71,8 +80,10 @@ export function ServersPageClient() {
   const { token, logout } = useAuth();
   const { locale } = useLocale();
   const [servers, setServers] = useState<Server[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
   const [form, setForm] = useState(initialForm);
   const [editNames, setEditNames] = useState<Record<number, string>>({});
+  const [installMethodByServer, setInstallMethodByServer] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -93,6 +104,13 @@ export function ServersPageClient() {
         preparing: "Подготовка...",
         prepare: "Подготовить сервер",
         install: "Установить AWG",
+        installMethodCard: "Способ установки AWG",
+        installHint: "SSH уже работает, но AWG не найден. Выберите способ установки и запустите bootstrap прямо из карточки сервера.",
+        installRunning: "Идёт установка AWG...",
+        installFinished: "Установка завершена",
+        installFailed: "Установка завершилась с ошибкой",
+        stageCheck: "Проверка SSH и диагностика",
+        stageInstall: "Установка AWG",
         saveName: "Сохранить имя",
         remove: "Удалить",
         confirmRemove: "Удалить сервер? Если он используется в topology, операция будет запрещена.",
@@ -105,7 +123,6 @@ export function ServersPageClient() {
         labels: {
           name: "Имя сервера",
           host: "IP / Host",
-          installMethod: "Установка",
           sshPort: "SSH порт",
           sshUser: "SSH пользователь",
           auth: "Авторизация",
@@ -138,6 +155,13 @@ export function ServersPageClient() {
         preparing: "Preparing...",
         prepare: "Prepare server",
         install: "Install AWG",
+        installMethodCard: "AWG install method",
+        installHint: "SSH is already working, but AWG is not detected. Choose the install method and start bootstrap directly from the server card.",
+        installRunning: "AWG installation is in progress...",
+        installFinished: "Installation completed",
+        installFailed: "Installation failed",
+        stageCheck: "SSH check and diagnostics",
+        stageInstall: "AWG installation",
         saveName: "Save name",
         remove: "Delete",
         confirmRemove: "Delete this server? If it is attached to a topology, the operation will be blocked.",
@@ -150,7 +174,6 @@ export function ServersPageClient() {
         labels: {
           name: "Server name",
           host: "IP / Host",
-          installMethod: "Install method",
           sshPort: "SSH port",
           sshUser: "SSH user",
           auth: "Authentication",
@@ -184,6 +207,12 @@ export function ServersPageClient() {
           return acc;
         }, {})
       );
+      setInstallMethodByServer(
+        nextServers.reduce<Record<number, string>>((acc, server) => {
+          acc[server.id] = server.install_method === "go" || server.install_method === "native" ? "go" : "docker";
+          return acc;
+        }, {})
+      );
       setError(null);
     } catch (nextError) {
       const message = nextError instanceof Error ? nextError.message : "Failed to load servers";
@@ -196,6 +225,35 @@ export function ServersPageClient() {
 
   useEffect(() => {
     void loadServers();
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadJobs() {
+      try {
+        const nextJobs = await apiRequest<Job[]>("/jobs", { token });
+        if (!cancelled) {
+          setJobs(nextJobs);
+        }
+      } catch {
+        // keep last known jobs state
+      }
+    }
+
+    void loadJobs();
+    const timer = window.setInterval(() => {
+      void loadJobs();
+    }, 4000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [token]);
 
   function parseRuntimeDetails(server: Server): LiveRuntimeDetails | null {
@@ -263,6 +321,10 @@ export function ServersPageClient() {
     return server.runtime_flavor ?? server.install_method;
   }
 
+  function latestServerJob(serverId: number, jobType?: string) {
+    return jobs.find((job) => job.server_id === serverId && (!jobType || job.job_type === jobType)) ?? null;
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!token) {
@@ -278,7 +340,6 @@ export function ServersPageClient() {
           host: form.host,
           ssh_port: Number(form.ssh_port) || 22,
           ssh_user: form.ssh_user,
-          install_method: form.install_method,
           auth_method: form.auth_method,
           ssh_password: form.auth_method === "password" ? form.ssh_password || null : null,
           ssh_private_key: form.auth_method === "key" ? form.ssh_private_key || null : null,
@@ -309,6 +370,29 @@ export function ServersPageClient() {
       await loadServers();
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Failed to prepare server");
+    } finally {
+      setWorkingServerId(null);
+    }
+  }
+
+  async function bootstrapServer(serverId: number) {
+    if (!token) {
+      return;
+    }
+    setWorkingServerId(serverId);
+    try {
+      await apiRequest(`/servers/${serverId}/bootstrap`, {
+        method: "POST",
+        token,
+        body: {
+          install_method: installMethodByServer[serverId] === "go" ? "go" : "docker"
+        }
+      });
+      await loadServers();
+      const nextJobs = await apiRequest<Job[]>("/jobs", { token });
+      setJobs(nextJobs);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Failed to bootstrap server");
     } finally {
       setWorkingServerId(null);
     }
@@ -359,12 +443,16 @@ export function ServersPageClient() {
 
   return (
     <ProtectedApp>
-      <div className="page-header">
+      <div className="page-header page-header-with-fixed-action">
         <div>
           <span className="eyebrow">Servers</span>
           <h2>{copy.title}</h2>
         </div>
-        <button type="button" className="secondary-button" onClick={() => void loadServers()}>
+        <button
+          type="button"
+          className="secondary-button page-action-fixed"
+          onClick={() => void loadServers()}
+        >
           {copy.refresh}
         </button>
       </div>
@@ -384,16 +472,6 @@ export function ServersPageClient() {
             <label className="field">
               <span>{copy.labels.host}</span>
               <input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} required />
-            </label>
-            <label className="field">
-              <span>{copy.labels.installMethod}</span>
-              <select
-                value={form.install_method}
-                onChange={(e) => setForm({ ...form, install_method: e.target.value })}
-              >
-                <option value="docker">docker</option>
-                <option value="go">go</option>
-              </select>
             </label>
             <label className="field">
               <span>{copy.labels.sshPort}</span>
@@ -459,9 +537,11 @@ export function ServersPageClient() {
               servers.map((server) => {
                 const details = parseRuntimeDetails(server);
                 const metadata = parseMetadata(server);
+                const bootstrapJob = latestServerJob(server.id, "bootstrap-server");
                 const flag = flagForCountry(metadata?.country_code);
                 const flagTitle = geoTitle(metadata);
                 const clientCount = server.live_peer_count ?? details?.peers?.length ?? 0;
+                const needsInstall = server.access_status === "ok" && !server.awg_detected;
                 return (
                   <article key={server.id} className="server-card">
                     <div className="server-card-header">
@@ -532,15 +612,6 @@ export function ServersPageClient() {
                       >
                         {workingServerId === server.id ? copy.preparing : copy.prepare}
                       </button>
-                      {server.access_status === "ok" && server.awg_status === "missing" ? (
-                        <button
-                          type="button"
-                          className="secondary-button"
-                          onClick={() => void apiRequest(`/servers/${server.id}/bootstrap`, { method: "POST", token }).then(() => loadServers())}
-                        >
-                          {copy.install}
-                        </button>
-                      ) : null}
                       <button
                         type="button"
                         className="secondary-button"
@@ -550,6 +621,61 @@ export function ServersPageClient() {
                         {deletingServerId === server.id ? copy.deleting : copy.remove}
                       </button>
                     </div>
+
+                    {needsInstall ? (
+                      <div className="info-box">
+                        <div className="server-install-grid">
+                          <div>
+                            <strong>{copy.installMethodCard}</strong>
+                            <p>{copy.installHint}</p>
+                          </div>
+                          <label className="field">
+                            <span>{copy.installMethodCard}</span>
+                            <select
+                              value={installMethodByServer[server.id] ?? "docker"}
+                              onChange={(event) => setInstallMethodByServer({ ...installMethodByServer, [server.id]: event.target.value })}
+                            >
+                              <option value="docker">docker</option>
+                              <option value="go">go</option>
+                            </select>
+                          </label>
+                          <div className="field field-action">
+                            <span>&nbsp;</span>
+                            <button
+                              type="button"
+                              className="primary-button"
+                              disabled={workingServerId === server.id}
+                              onClick={() => void bootstrapServer(server.id)}
+                            >
+                              {workingServerId === server.id ? copy.installRunning : copy.install}
+                            </button>
+                          </div>
+                        </div>
+
+                        {bootstrapJob ? (
+                          <div className="server-bootstrap-status">
+                            <span className={`status-badge ${
+                              bootstrapJob.status === "succeeded"
+                                ? "status-succeeded"
+                                : bootstrapJob.status === "failed"
+                                  ? "status-failed"
+                                  : "status-pending"
+                            }`}>
+                              {bootstrapJob.status === "running" || bootstrapJob.status === "pending"
+                                ? copy.installRunning
+                                : bootstrapJob.status === "succeeded"
+                                  ? copy.installFinished
+                                  : copy.installFailed}
+                            </span>
+                            {bootstrapJob.result_message ? <pre className="log-box">{bootstrapJob.result_message}</pre> : null}
+                          </div>
+                        ) : (
+                          <div className="server-bootstrap-status">
+                            <span className="status-badge status-pending">{copy.stageCheck}</span>
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
 
                     {details?.config_preview ? (
                       <details className="preview-item server-details-block">
