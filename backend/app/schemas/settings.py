@@ -1,0 +1,43 @@
+from pydantic import BaseModel
+
+
+class DeliverySettingsRead(BaseModel):
+    delivery_email_enabled: bool
+    delivery_telegram_enabled: bool
+    admin_email_notifications_enabled: bool
+    admin_telegram_notifications_enabled: bool
+    notification_level: str
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password_configured: bool = False
+    smtp_from_email: str | None = None
+    smtp_from_name: str | None = None
+    smtp_use_tls: bool = True
+    telegram_bot_token_configured: bool = False
+    telegram_admin_chat_id: str | None = None
+    admin_notification_email: str | None = None
+
+
+class DeliverySettingsUpdate(BaseModel):
+    delivery_email_enabled: bool
+    delivery_telegram_enabled: bool
+    admin_email_notifications_enabled: bool
+    admin_telegram_notifications_enabled: bool
+    notification_level: str
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str | None = None
+    smtp_from_name: str | None = None
+    smtp_use_tls: bool = True
+    telegram_bot_token: str | None = None
+    telegram_admin_chat_id: str | None = None
+    admin_notification_email: str | None = None
+
+
+class DeliveryTestResult(BaseModel):
+    channel: str
+    status: str
+    detail: str

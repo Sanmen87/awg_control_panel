@@ -1,0 +1,14 @@
+alembic==1.14.1
+asyncssh==2.21.0
+celery==5.4.0
+cryptography==44.0.2
+fastapi==0.115.12
+IP2Location==8.11.0
+python-multipart==0.0.20
+psycopg[binary]==3.2.6
+pydantic-settings==2.8.1
+python-jose[cryptography]==3.4.0
+qrcode[pil]==8.1
+redis==5.2.1
+sqlalchemy==2.0.39
+uvicorn[standard]==0.34.0
