@@ -82,6 +82,56 @@ class ClientMaterialsService:
             qr_png_base64_list=qr_png_base64_list,
         )
 
+    def rebuild_for_client(self, server: Server, client: Client) -> GeneratedClientMaterials:
+        if not client.private_key_encrypted:
+            raise RuntimeError("Client private key is unavailable")
+        if not client.assigned_ip:
+            raise RuntimeError("Client assigned IP is unavailable")
+        private_key = decrypt_value(client.private_key_encrypted)
+        public_key = client.public_key or self._derive_public_from_private(private_key)
+        preshared_key = decrypt_value(client.preshared_key_encrypted) if client.preshared_key_encrypted else self._generate_psk()
+        server_public_key = self._derive_public_key_from_server(server)
+        endpoint = f"{server.host}:{server.live_listen_port or 51820}"
+        dns_value = self._server_dns(server)
+        obfuscation_fields = self._extract_obfuscation_fields(server)
+
+        amneziawg_config = self._render_client_config(
+            client_name=client.name,
+            assigned_ip=client.assigned_ip,
+            private_key=private_key,
+            preshared_key=preshared_key,
+            server_public_key=server_public_key,
+            endpoint=endpoint,
+            dns_value=dns_value,
+            extra_interface_fields=obfuscation_fields,
+        )
+        ubuntu_config = amneziawg_config
+        amneziavpn_payload = self._build_amneziavpn_payload(
+            server=server,
+            name=client.name,
+            assigned_ip=client.assigned_ip,
+            private_key=private_key,
+            preshared_key=preshared_key,
+            server_public_key=server_public_key,
+            endpoint=endpoint,
+            dns_value=dns_value,
+            awg_config=amneziawg_config,
+            obfuscation_fields=obfuscation_fields,
+        )
+        amneziavpn_config = self._render_amneziavpn_text(amneziavpn_payload)
+        qr_png_base64_list = self._generate_qr_png_base64_list(amneziavpn_payload)
+        return GeneratedClientMaterials(
+            private_key=private_key,
+            public_key=public_key,
+            preshared_key=preshared_key,
+            assigned_ip=client.assigned_ip,
+            ubuntu_config=ubuntu_config,
+            amneziawg_config=amneziawg_config,
+            amneziavpn_config=amneziavpn_config,
+            qr_png_base64=qr_png_base64_list[0],
+            qr_png_base64_list=qr_png_base64_list,
+        )
+
     def next_available_ip(self, server: Server, existing_assigned_ips: list[str]) -> str:
         if not server.live_address_cidr:
             raise RuntimeError("Server subnet is unknown")
@@ -156,6 +206,15 @@ class ClientMaterialsService:
         if not private_key:
             raise RuntimeError("Server private key is not available in live config")
 
+        private_bytes = base64.b64decode(private_key.encode("utf-8"))
+        private = x25519.X25519PrivateKey.from_private_bytes(private_bytes)
+        public_raw = private.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        return base64.b64encode(public_raw).decode("utf-8")
+
+    def _derive_public_from_private(self, private_key: str) -> str:
         private_bytes = base64.b64decode(private_key.encode("utf-8"))
         private = x25519.X25519PrivateKey.from_private_bytes(private_bytes)
         public_raw = private.public_key().public_bytes(

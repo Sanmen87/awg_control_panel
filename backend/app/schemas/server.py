@@ -34,6 +34,11 @@ class ServerBootstrapRequest(BaseModel):
     install_method: InstallMethod | None = None
 
 
+class ServerAwgProfileUpdate(BaseModel):
+    profile_name: str
+    apply_now: bool = True
+
+
 class ServerRead(ServerBase):
     id: int
     name: str
@@ -57,6 +62,7 @@ class ServerRead(ServerBase):
     host_metrics_json: str | None
     host_metrics_refreshed_at: datetime | None
     ready_for_topology: bool
+    ready_for_managed_clients: bool = False
     topology_name: str | None = None
     last_checked_at: datetime | None
     last_error: str | None

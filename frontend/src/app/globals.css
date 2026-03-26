@@ -160,6 +160,11 @@ a {
   gap: 12px;
 }
 
+.dashboard-servers-list {
+  display: grid;
+  gap: 12px;
+}
+
 .dashboard-peer-row {
   display: flex;
   justify-content: space-between;
@@ -168,7 +173,20 @@ a {
   border-bottom: 1px solid rgba(217, 207, 189, 0.5);
 }
 
+.dashboard-server-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(217, 207, 189, 0.5);
+}
+
 .dashboard-peer-row > div {
+  display: grid;
+  gap: 4px;
+}
+
+.dashboard-server-row > div {
   display: grid;
   gap: 4px;
 }

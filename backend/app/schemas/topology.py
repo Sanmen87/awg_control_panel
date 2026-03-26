@@ -11,6 +11,7 @@ class TopologyBase(BaseModel):
     active_exit_server_id: int | None = None
     failover_config_json: str | None = None
     config_version: str | None = None
+    metadata_json: str | None = None
 
 
 class TopologyCreate(TopologyBase):
@@ -23,6 +24,7 @@ class TopologyUpdate(BaseModel):
     active_exit_server_id: int | None = None
     failover_config_json: str | None = None
     config_version: str | None = None
+    metadata_json: str | None = None
 
 
 class TopologyRead(TopologyBase):

@@ -13,17 +13,41 @@ from app.models.topology import Topology
 from app.models.topology_node import TopologyNode
 from app.models.user import User
 from app.schemas.job import DeploymentJobRead
-from app.schemas.server import ServerBootstrapRequest, ServerCreate, ServerRead, ServerUpdate
+from app.schemas.server import ServerAwgProfileUpdate, ServerBootstrapRequest, ServerCreate, ServerRead, ServerUpdate
+from app.services.awg_profile import AWGProfileService
 from app.services.awg_detection import DETECT_AWG_COMMAND, parse_detection_output
 from app.services.audit import AuditService
 from app.services.bootstrap_commands import CHECK_SERVER_COMMAND
+from app.services.client_materials import ClientMaterialsService
+from app.services.client_sync import ClientSyncService
 from app.services.job_service import JobService
 from app.services.server_geo import ServerGeoService
 from app.services.server_credentials import ServerCredentialsService
 from app.services.ssh import SSHService
 from app.services.standard_config_inspector import StandardConfigInspector
+from app.services.topology_deployer import TopologyDeployer
+from app.services.topology_renderer import RenderedConfig
 
 router = APIRouter()
+
+
+def _is_server_ready_for_managed_clients(server: Server) -> bool:
+    if not server.awg_detected:
+        return False
+    if not server.live_address_cidr or not server.live_listen_port:
+        return False
+    try:
+        runtime_details = json.loads(server.live_runtime_details_json) if server.live_runtime_details_json else {}
+    except json.JSONDecodeError:
+        runtime_details = {}
+    if not isinstance(runtime_details, dict):
+        runtime_details = {}
+    config_preview = runtime_details.get("config_preview")
+    return isinstance(config_preview, str) and bool(config_preview.strip())
+
+
+def _hydrate_server_readiness(server: Server) -> None:
+    setattr(server, "ready_for_managed_clients", _is_server_ready_for_managed_clients(server))
 
 
 @router.get("", response_model=list[ServerRead])
@@ -50,6 +74,7 @@ def list_servers(db: Session = Depends(get_db), _: User = Depends(get_current_us
                 db.add(server)
                 metadata_changed = True
         setattr(server, "topology_name", topology_name_by_server.get(server.id))
+        _hydrate_server_readiness(server)
     if metadata_changed:
         db.commit()
         for server in servers:
@@ -82,6 +107,7 @@ def create_server(
     db.add(server)
     db.commit()
     db.refresh(server)
+    _hydrate_server_readiness(server)
     AuditService().log(
         db,
         action="server.created",
@@ -109,6 +135,7 @@ def update_server(
     db.add(server)
     db.commit()
     db.refresh(server)
+    _hydrate_server_readiness(server)
     AuditService().log(
         db,
         action="server.updated",
@@ -117,6 +144,92 @@ def update_server(
         details=f"Server {server.name} updated",
         user_id=current_user.id,
     )
+    _hydrate_server_readiness(server)
+    return server
+
+
+@router.post("/{server_id}/awg-profile", response_model=ServerRead)
+def update_server_awg_profile(
+    server_id: int,
+    payload: ServerAwgProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Server:
+    server = db.query(Server).filter(Server.id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+
+    profile_service = AWGProfileService()
+    if not profile_service.is_valid_profile_name(payload.profile_name):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown AWG profile")
+
+    profile_service.set_profile_metadata(server, payload.profile_name)
+    db.add(server)
+
+    if payload.apply_now and server.awg_detected and server.config_source == "generated" and server.live_runtime_details_json:
+        try:
+            runtime_details = json.loads(server.live_runtime_details_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Server live config is unavailable") from exc
+        if not isinstance(runtime_details, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Server live config is unavailable")
+
+        live_config = str(runtime_details.get("config_preview") or "").strip()
+        if not live_config:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Server live config is unavailable")
+        if not server.live_config_path:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Server config path is unavailable")
+
+        fields = profile_service.for_generated_server(server)
+        rendered_config = profile_service.apply_profile_to_config(live_config, fields)
+        runtime_details["config_preview"] = rendered_config
+        runtime_details["awg_profile_name"] = payload.profile_name
+        runtime_details["awg_profile_fields"] = fields
+        server.live_runtime_details_json = json.dumps(runtime_details)
+        db.add(server)
+        db.commit()
+        db.refresh(server)
+
+        rendered = RenderedConfig(
+            server_id=server.id,
+            interface_name=server.live_interface_name or "awg0",
+            remote_path=server.live_config_path,
+            content=rendered_config,
+        )
+        asyncio.run(TopologyDeployer().upload_and_apply_adopted_standard(server, rendered))
+
+        materials_service = ClientMaterialsService()
+        clients = (
+            db.query(Client)
+            .filter(Client.server_id == server.id, Client.archived.is_(False))
+            .order_by(Client.created_at.asc())
+            .all()
+        )
+        for client in clients:
+            if client.source.value != "generated":
+                continue
+            materials = materials_service.rebuild_for_client(server, client)
+            client.config_ubuntu_encrypted = materials_service.encrypt_material(materials.ubuntu_config)
+            client.config_amneziawg_encrypted = materials_service.encrypt_material(materials.amneziawg_config)
+            client.config_amneziavpn_encrypted = materials_service.encrypt_material(materials.amneziavpn_config)
+            client.qr_png_base64_encrypted = materials_service.encrypt_qr_material(materials.qr_png_base64_list)
+            db.add(client)
+        db.commit()
+        ClientSyncService().apply_server_clients(db, server)
+        db.refresh(server)
+    else:
+        db.commit()
+        db.refresh(server)
+
+    AuditService().log(
+        db,
+        action="server.awg_profile.updated",
+        resource_type="server",
+        resource_id=str(server.id),
+        details=f"AWG profile set to {payload.profile_name} for {server.name}",
+        user_id=current_user.id,
+    )
+    _hydrate_server_readiness(server)
     return server
 
 
@@ -320,6 +433,7 @@ def inspect_standard_server(
     db.add(server)
     db.commit()
     db.refresh(server)
+    _hydrate_server_readiness(server)
     AuditService().log(
         db,
         action="server.inspect_standard.completed",
@@ -365,6 +479,7 @@ def prepare_server(
             db.add(server)
             db.commit()
             db.refresh(server)
+            _hydrate_server_readiness(server)
             return server
 
         check_payload = json.loads(check_result.stdout.strip().splitlines()[-1])
@@ -428,6 +543,7 @@ def prepare_server(
         db.add(server)
         db.commit()
         db.refresh(server)
+        _hydrate_server_readiness(server)
         AuditService().log(
             db,
             action="server.prepared",
@@ -445,4 +561,5 @@ def prepare_server(
         db.add(server)
         db.commit()
         db.refresh(server)
+        _hydrate_server_readiness(server)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc

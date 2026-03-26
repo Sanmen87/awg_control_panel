@@ -33,6 +33,7 @@ type Server = {
   metadata_json: string | null;
   topology_name: string | null;
   ready_for_topology: boolean;
+  ready_for_managed_clients: boolean;
   last_error: string | null;
 };
 
@@ -115,9 +116,14 @@ export function ServersPageClient() {
         remove: "Удалить",
         confirmRemove: "Удалить сервер? Если он используется в topology, операция будет запрещена.",
         ready: "Готов к topology",
+        readyManaged: "Готов к клиентам",
+        runtimeOnly: "Только runtime",
         notReady: "Не готов",
         imported: "Imported",
         generated: "Generated",
+        noLiveConfig: "Live config отсутствует",
+        importedLive: "Live config импортирован",
+        generatedLive: "Generated config применён",
         helper:
           "После добавления сервер можно одним действием проверить, определить AWG и импортировать текущий конфиг. В карточке остаются только короткие итоговые статусы.",
         labels: {
@@ -166,9 +172,14 @@ export function ServersPageClient() {
         remove: "Delete",
         confirmRemove: "Delete this server? If it is attached to a topology, the operation will be blocked.",
         ready: "Ready for topology",
+        readyManaged: "Ready for clients",
+        runtimeOnly: "Runtime only",
         notReady: "Not ready",
         imported: "Imported",
         generated: "Generated",
+        noLiveConfig: "Live config missing",
+        importedLive: "Live config imported",
+        generatedLive: "Generated config deployed",
         helper:
           "After adding a server, one action can verify SSH, detect AWG, and import the current config. The card keeps only short resulting statuses.",
         labels: {
@@ -267,15 +278,19 @@ export function ServersPageClient() {
     }
   }
 
-  function parseMetadata(server: Server): ServerMetadata | null {
-    if (!server.metadata_json) {
+  function parseServerMetadata(raw: string | null): ServerMetadata | null {
+    if (!raw) {
       return null;
     }
     try {
-      return JSON.parse(server.metadata_json) as ServerMetadata;
+      return JSON.parse(raw) as ServerMetadata;
     } catch {
       return null;
     }
+  }
+
+  function parseMetadata(server: Server): ServerMetadata | null {
+    return parseServerMetadata(server.metadata_json);
   }
 
   function flagForCountry(countryCode?: string) {
@@ -319,6 +334,16 @@ export function ServersPageClient() {
       return "go";
     }
     return server.runtime_flavor ?? server.install_method;
+  }
+
+  function configStage(server: Server) {
+    if (!server.awg_detected) {
+      return copy.notReady;
+    }
+    if (!server.ready_for_managed_clients) {
+      return copy.runtimeOnly;
+    }
+    return server.config_source === "imported" ? copy.importedLive : copy.generatedLive;
   }
 
   function latestServerJob(serverId: number, jobType?: string) {
@@ -560,9 +585,12 @@ export function ServersPageClient() {
                         <span className={server.ready_for_topology ? "status-badge status-succeeded" : "status-badge status-pending"}>
                           {server.ready_for_topology ? copy.ready : copy.notReady}
                         </span>
+                        <span className={server.ready_for_managed_clients ? "status-badge status-succeeded" : "status-badge status-pending"}>
+                          {server.ready_for_managed_clients ? copy.readyManaged : copy.runtimeOnly}
+                        </span>
                         <span className="status-badge">{summaryAwg(server, details)}</span>
                         <span className="status-badge">
-                          {server.config_source === "imported" ? copy.imported : copy.generated}
+                          {configStage(server)}
                         </span>
                       </div>
                     </div>

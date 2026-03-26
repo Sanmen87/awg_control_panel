@@ -42,6 +42,7 @@ type Topology = {
   status: string;
   active_exit_server_id: number | null;
   failover_config_json: string | null;
+  metadata_json: string | null;
 };
 
 type TopologyNode = {
@@ -119,6 +120,18 @@ function stringifyFailoverConfig(config: FailoverForm): string {
   return JSON.stringify(config);
 }
 
+function parseTopologyMetadata(raw: string | null): { awg_profile_name?: string } {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as { awg_profile_name?: string };
+    return typeof parsed === "object" && parsed ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 export function TopologiesPageClient() {
   const { token, logout } = useAuth();
   const { locale } = useLocale();
@@ -129,6 +142,7 @@ export function TopologiesPageClient() {
   const [createForm, setCreateForm] = useState(initialCreateForm);
   const [editorName, setEditorName] = useState("");
   const [editorType, setEditorType] = useState("standard");
+  const [editorAwgProfile, setEditorAwgProfile] = useState("balanced");
   const [failoverForm, setFailoverForm] = useState<FailoverForm>(DEFAULT_FAILOVER);
   const [standardServerId, setStandardServerId] = useState("");
   const [proxyServerId, setProxyServerId] = useState("");
@@ -158,6 +172,7 @@ export function TopologiesPageClient() {
         fields: {
           name: "Имя",
           type: "Тип topology",
+          awgProfile: "AWG-профиль",
           standardServer: "Основной сервер",
           proxyServer: "Входной proxy",
           exitServer: "Exit сервер",
@@ -178,6 +193,11 @@ export function TopologiesPageClient() {
           proxyExit: "Один proxy и один exit. Подходит как первый failover-сценарий.",
           proxyMultiExit: "Один proxy и несколько exit с приоритетами переключения."
         },
+        profiles: {
+          compatible: "compatible",
+          balanced: "balanced",
+          aggressive: "aggressive dpi evasion"
+        },
         actions: {
           saveTopology: "Сохранить topology",
           changeType: "Сменить тип topology",
@@ -193,6 +213,8 @@ export function TopologiesPageClient() {
           readyOnly: "В списке доступны только серверы, готовые для topology.",
           typeChange:
             "При смене типа панель старается сохранить совместимые узлы и приводит роли к новому сценарию. Если что-то лишнее, вы увидите это на шаге проверки.",
+          awgProfile:
+            "Профиль обфускации задаётся на уровне topology. После его смены нужно заново применить topology, чтобы сервер и generated-клиенты получили новые параметры.",
           failover:
             "JSON скрыт. Панель сама сохраняет настройки failover во внутреннем формате.",
           validationOk: "Topology валидна и готова к preview/deploy.",
@@ -238,6 +260,7 @@ export function TopologiesPageClient() {
         fields: {
           name: "Name",
           type: "Topology type",
+          awgProfile: "AWG profile",
           standardServer: "Primary server",
           proxyServer: "Ingress proxy",
           exitServer: "Exit server",
@@ -258,6 +281,11 @@ export function TopologiesPageClient() {
           proxyExit: "One proxy and one exit. Good starting point for failover topology.",
           proxyMultiExit: "One proxy with multiple exits and ordered failover."
         },
+        profiles: {
+          compatible: "compatible",
+          balanced: "balanced",
+          aggressive: "aggressive dpi evasion"
+        },
         actions: {
           saveTopology: "Save topology",
           changeType: "Change topology type",
@@ -273,6 +301,8 @@ export function TopologiesPageClient() {
           readyOnly: "Only servers marked ready for topology are available here.",
           typeChange:
             "When you change the topology type, the panel keeps compatible nodes and adjusts roles to the new scenario where possible.",
+          awgProfile:
+            "Obfuscation profile is configured on topology level. Re-deploy the topology after changing it so the server and generated clients receive updated parameters.",
           failover: "Raw JSON is hidden. The panel stores failover settings in the backend format automatically.",
           validationOk: "Topology is valid and ready for preview/deploy.",
           previewEmpty: "Preview has not been requested yet."
@@ -416,6 +446,7 @@ export function TopologiesPageClient() {
     if (!selectedTopology) {
       setEditorName("");
       setEditorType("standard");
+      setEditorAwgProfile("balanced");
       setFailoverForm(DEFAULT_FAILOVER);
       setStandardServerId("");
       setProxyServerId("");
@@ -425,6 +456,7 @@ export function TopologiesPageClient() {
 
     setEditorName(selectedTopology.name);
     setEditorType(selectedTopology.type);
+    setEditorAwgProfile(parseTopologyMetadata(selectedTopology.metadata_json).awg_profile_name ?? "balanced");
     setFailoverForm(parseFailoverConfig(selectedTopology.failover_config_json));
 
     const standardNode = selectedNodes.find((node) => node.role === "standard-vpn");
@@ -466,7 +498,8 @@ export function TopologiesPageClient() {
         body: {
           name: createForm.name,
           type: createForm.type,
-          failover_config_json: stringifyFailoverConfig(DEFAULT_FAILOVER)
+          failover_config_json: stringifyFailoverConfig(DEFAULT_FAILOVER),
+          metadata_json: JSON.stringify({ awg_profile_name: "balanced" })
         }
       });
       setCreateForm(initialCreateForm);
@@ -490,7 +523,8 @@ export function TopologiesPageClient() {
         token,
         body: {
           name: editorName,
-          failover_config_json: stringifyFailoverConfig(failoverForm)
+          failover_config_json: stringifyFailoverConfig(failoverForm),
+          metadata_json: JSON.stringify({ awg_profile_name: editorAwgProfile })
         }
       });
       await loadData();
@@ -890,6 +924,7 @@ export function TopologiesPageClient() {
                   </span>
                 </div>
                 <p>{copy.helper.typeChange}</p>
+                <div className="info-box">{copy.helper.awgProfile}</div>
                 <div className="form-grid compact-form-grid">
                   <label className="field">
                     <span>{copy.fields.name}</span>
@@ -901,6 +936,14 @@ export function TopologiesPageClient() {
                       <option value="standard">{copy.types.standard}</option>
                       <option value="proxy-exit">{copy.types.proxyExit}</option>
                       <option value="proxy-multi-exit">{copy.types.proxyMultiExit}</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>{copy.fields.awgProfile}</span>
+                    <select value={editorAwgProfile} onChange={(event) => setEditorAwgProfile(event.target.value)}>
+                      <option value="compatible">{copy.profiles.compatible}</option>
+                      <option value="balanced">{copy.profiles.balanced}</option>
+                      <option value="aggressive">{copy.profiles.aggressive}</option>
                     </select>
                   </label>
                 </div>

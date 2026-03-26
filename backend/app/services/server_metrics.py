@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from app.models.server import AccessStatus, Server
+from app.models.server import AccessStatus, Server, ServerStatus
 from app.models.server_runtime_sample import ServerRuntimeSample
 from app.services.server_credentials import ServerCredentialsService
 from app.services.ssh import SSHService
@@ -212,6 +212,8 @@ class ServerMetricsService:
         snapshot = await self.collect(server)
         server.host_metrics_json = snapshot.to_json()
         server.host_metrics_refreshed_at = snapshot.sampled_at
+        server.status = ServerStatus.HEALTHY
+        server.last_error = None
         server_sample = ServerRuntimeSample(
             server_id=server.id,
             sampled_at=snapshot.sampled_at,
@@ -232,3 +234,8 @@ class ServerMetricsService:
         db.add(server)
         db.add(server_sample)
         return True
+
+    def mark_collection_error(self, db: Session, server: Server, exc: Exception) -> None:
+        server.status = ServerStatus.DEGRADED
+        server.last_error = str(exc)
+        db.add(server)

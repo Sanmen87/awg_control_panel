@@ -37,3 +37,4 @@ class Topology(Base, TimestampMixin):
     active_exit_server_id: Mapped[int | None] = mapped_column(nullable=True)
     failover_config_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     config_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)

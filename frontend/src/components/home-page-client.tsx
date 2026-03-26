@@ -96,6 +96,11 @@ export function HomePageClient() {
         topPeers: "Топ peer-ов по трафику",
         topPeersHint: "Rolling 30 дней",
         noPeers: "Пока нет данных по peer-ам.",
+        serversList: "Состояние серверов",
+        serversListHint: "Живы ли узлы и их uptime",
+        serverOnline: "в сети",
+        serverOffline: "выключен",
+        noServers: "Серверов пока нет.",
         clientsTitle: "Клиенты и доступ",
         active: "Активны",
         online: "Онлайн",
@@ -132,6 +137,11 @@ export function HomePageClient() {
         topPeers: "Top peers by traffic",
         topPeersHint: "Rolling 30 days",
         noPeers: "No peer traffic data yet.",
+        serversList: "Server state",
+        serversListHint: "Live state and uptime",
+        serverOnline: "online",
+        serverOffline: "offline",
+        noServers: "No servers yet.",
         clientsTitle: "Clients and access",
         active: "Active",
         online: "Online",
@@ -231,6 +241,22 @@ export function HomePageClient() {
       return `${hours}h ${minutes}m`;
     }
     return `${minutes}m`;
+  }
+
+  function hasFreshMetrics(server: Server): boolean {
+    const sampledAt = server.metrics?.sampled_at;
+    if (!sampledAt) {
+      return false;
+    }
+    const sampledMs = new Date(sampledAt).getTime();
+    if (!Number.isFinite(sampledMs)) {
+      return false;
+    }
+    return Date.now() - sampledMs <= 3 * 60 * 1000;
+  }
+
+  function isServerOnline(server: Server): boolean {
+    return hasFreshMetrics(server) && Boolean(server.metrics?.uptime_seconds);
   }
 
   return (
@@ -363,6 +389,36 @@ export function HomePageClient() {
                 </div>
               ) : (
                 <div className="empty-state">{copy.noPeers}</div>
+              )}
+            </article>
+
+            <article className="card dashboard-card">
+              <div className="dashboard-card-head">
+                <div>
+                  <span className="eyebrow">{copy.serversList}</span>
+                  <p>{copy.serversListHint}</p>
+                </div>
+              </div>
+              {stats.servers.length ? (
+                <div className="dashboard-servers-list">
+                  {stats.servers.map((server) => {
+                    const online = isServerOnline(server);
+                    return (
+                      <div key={server.id} className="dashboard-server-row">
+                        <div>
+                          <strong>{server.name}</strong>
+                          <small>{online ? copy.serverOnline : copy.serverOffline}</small>
+                        </div>
+                        <div>
+                          <strong>{online && server.metrics ? formatUptime(server.metrics.uptime_seconds) : "—"}</strong>
+                          <small>{server.install_method}</small>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="empty-state">{copy.noServers}</div>
               )}
             </article>
           </div>

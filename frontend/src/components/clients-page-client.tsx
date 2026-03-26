@@ -46,6 +46,7 @@ type Server = {
   name: string;
   status: string;
   awg_detected: boolean;
+  ready_for_managed_clients: boolean;
   metadata_json: string | null;
 };
 
@@ -310,6 +311,7 @@ export function ClientsPageClient() {
         importSummary: "Импорт завершен",
         importHint: "Панель подтянет существующие peer-ы с сервера и сохранит их как клиентов.",
         createHint: "Создание управляемого клиента с сохранением конфигов и QR в базе.",
+        createServerHint: "Для создания клиента показываются только серверы с готовым live config.",
         materialsTitle: "Материалы клиента",
         qrHint: "Если QR несколько, сканируй их по порядку.",
         awgQrTitle: "QR для AmneziaWG",
@@ -407,6 +409,7 @@ export function ClientsPageClient() {
         importSummary: "Import completed",
         importHint: "The panel will pull existing peers from the server and store them as clients.",
         createHint: "Create a managed client and store configs and QR in the database.",
+        createServerHint: "Only servers with a ready live config are shown for managed client creation.",
         materialsTitle: "Client materials",
         qrHint: "If there are several QR codes, scan them in order.",
         awgQrTitle: "QR for AmneziaWG",
@@ -977,10 +980,11 @@ export function ClientsPageClient() {
             </label>
             <label className="field">
               <span>{copy.fields.server}</span>
+              <small>{copy.createServerHint}</small>
               <select value={newClientServerId} onChange={(event) => setNewClientServerId(event.target.value)} required>
                 <option value=""></option>
                 {servers
-                  .filter((server) => server.awg_detected)
+                  .filter((server) => server.ready_for_managed_clients)
                   .map((server) => (
                     <option key={server.id} value={server.id}>
                       {server.name}

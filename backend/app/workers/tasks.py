@@ -15,6 +15,7 @@ from app.models.server import AWGStatus, AccessStatus, InstallMethod, Server, Se
 from app.models.topology import Topology, TopologyStatus, TopologyType
 from app.models.topology_node import TopologyNode
 from app.services.awg_detection import DETECT_AWG_COMMAND, parse_detection_output
+from app.services.awg_profile import AWGProfileService
 from app.services.bootstrap_commands import (
     BOOTSTRAP_SERVER_DOCKER_COMMAND,
     BOOTSTRAP_SERVER_GO_COMMAND,
@@ -40,6 +41,7 @@ def _extract_rendered_config_value(content: str, key: str) -> str | None:
 def _persist_generated_standard_server_state(db: Session, topology: Topology | None, rendered_files: list) -> None:
     if not topology or topology.type != TopologyType.STANDARD:
         return
+    profile_service = AWGProfileService()
     for rendered in rendered_files:
         server = db.query(Server).filter(Server.id == rendered.server_id).first()
         if not server or server.config_source == "imported":
@@ -63,6 +65,7 @@ def _persist_generated_standard_server_state(db: Session, topology: Topology | N
         server.live_listen_port = int(listen_port_raw) if listen_port_raw and listen_port_raw.isdigit() else None
         server.live_peer_count = rendered.content.count("[Peer]")
         server.live_runtime_details_json = json.dumps(runtime_details)
+        profile_service.copy_profile_metadata(topology, server)
         db.add(server)
 
 
@@ -449,11 +452,16 @@ def sync_server_runtime_metrics() -> None:
     try:
         servers = db.query(Server).filter(Server.access_status == AccessStatus.OK).all()
         for server in servers:
-            updated = asyncio.run(service.sync_server(db, server))
-            if updated:
-                db.commit()
-            else:
+            try:
+                updated = asyncio.run(service.sync_server(db, server))
+                if updated:
+                    db.commit()
+                else:
+                    db.rollback()
+            except Exception as exc:  # noqa: BLE001
                 db.rollback()
+                service.mark_collection_error(db, server, exc)
+                db.commit()
     except Exception:  # noqa: BLE001
         db.rollback()
         raise
