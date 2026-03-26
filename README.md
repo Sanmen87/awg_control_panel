@@ -65,10 +65,45 @@ sudo docker compose up -d backend worker scheduler frontend nginx
 - SSH connectivity checks
 - AWG detection
 - docker-based Amnezia detection
+- panel-managed install modes:
+  - `docker`
+  - `go`
+  - `custom` is treated as import/adoption only
 - live config import from existing server
 - correct detection of `amnezia-awg`
 - server geolocation with local `IP2Location LITE DB3 BIN`
 - server country flag shown in UI
+
+#### Docker install branch
+
+The `docker` installation branch was rewritten.
+
+Previous behavior:
+
+- the panel built a custom local container which effectively embedded the `go` toolchain and AWG tools inside Docker
+
+Current behavior:
+
+- the panel follows an upstream-like Amnezia client flow instead of the old custom `go-in-docker` bootstrap
+- host preparation creates:
+  - `/opt/amnezia/amnezia-awg`
+  - `/opt/amnezia/amnezia-dns`
+  - docker network `amnezia-dns-net`
+- `amnezia-awg` is now built from an upstream-like Dockerfile based on:
+  - `amneziavpn/amneziawg-go:latest`
+- `amnezia-dns` is now built from an upstream-like Dockerfile based on:
+  - `mvance/unbound:latest`
+- containers are started in the same general order as the official `amnezia-client` flow:
+  - prepare host
+  - build images
+  - run `amnezia-dns`
+  - run `amnezia-awg`
+  - connect `amnezia-awg` to `amnezia-dns-net`
+
+Notes:
+
+- the panel still keeps `/opt/amnezia/awg` for compatibility with current import, `clientsTable`, and runtime sync logic
+- the branch is now much closer to the official AmneziaVPN server bootstrap, but post-install runtime behavior should still be validated end-to-end on a clean external server
 
 #### Topologies
 
@@ -254,10 +289,45 @@ sudo docker compose up -d backend worker scheduler frontend nginx
 - SSH check
 - детект AWG
 - docker-based детект Amnezia
+- panel-managed режимы установки:
+  - `docker`
+  - `go`
+  - `custom` считается только сценарием импорта/адаптации
 - импорт live-конфига с уже существующего сервера
 - корректное определение контейнера `amnezia-awg`
 - геолокация сервера по локальной базе `IP2Location LITE DB3 BIN`
 - флаги страны сервера в UI
+
+#### Docker-ветка установки
+
+Ветка установки `docker` была переписана.
+
+Раньше:
+
+- панель собирала собственный локальный контейнер, который по сути повторял `go`-ветку внутри Docker
+
+Сейчас:
+
+- панель использует flow, приближенный к официальному `amnezia-client`, а не старый кастомный bootstrap `go-in-docker`
+- при подготовке хоста создаются:
+  - `/opt/amnezia/amnezia-awg`
+  - `/opt/amnezia/amnezia-dns`
+  - docker-сеть `amnezia-dns-net`
+- `amnezia-awg` теперь собирается из upstream-like Dockerfile на базе:
+  - `amneziavpn/amneziawg-go:latest`
+- `amnezia-dns` теперь собирается из upstream-like Dockerfile на базе:
+  - `mvance/unbound:latest`
+- контейнеры поднимаются в том же общем порядке, что и в официальном `amnezia-client`:
+  - подготовка хоста
+  - сборка образов
+  - запуск `amnezia-dns`
+  - запуск `amnezia-awg`
+  - подключение `amnezia-awg` к `amnezia-dns-net`
+
+Примечания:
+
+- для совместимости с текущими import/runtime-механизмами панель по-прежнему использует `/opt/amnezia/awg`
+- ветка стала заметно ближе к официальному bootstrap AmneziaVPN, но post-install runtime поведение всё ещё нужно валидировать end-to-end на чистом внешнем сервере
 
 #### Топологии
 
