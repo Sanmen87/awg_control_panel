@@ -251,6 +251,7 @@ export function ServersPageClient() {
         if (!cancelled) {
           setJobs(nextJobs);
         }
+        await loadServers();
       } catch {
         // keep last known jobs state
       }

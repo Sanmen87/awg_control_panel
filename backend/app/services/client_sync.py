@@ -33,11 +33,23 @@ class ClientSyncService:
             )
             .first()
         )
-        if not standard_node:
+        proxy_node = (
+            db.query(TopologyNode)
+            .filter(
+                TopologyNode.server_id == server.id,
+                TopologyNode.role == TopologyNodeRole.PROXY,
+            )
+            .first()
+        )
+
+        node = standard_node or proxy_node
+        if not node:
             return
 
-        topology = db.query(Topology).filter(Topology.id == standard_node.topology_id).first()
-        if not topology or topology.type != TopologyType.STANDARD:
+        topology = db.query(Topology).filter(Topology.id == node.topology_id).first()
+        if not topology or topology.type not in {TopologyType.STANDARD, TopologyType.PROXY_EXIT}:
+            return
+        if topology.type == TopologyType.PROXY_EXIT and not proxy_node:
             return
 
         runtime_details = json.loads(server.live_runtime_details_json)

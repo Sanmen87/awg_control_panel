@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 from dataclasses import dataclass
@@ -23,12 +24,14 @@ class SSHService:
         port: int,
         password: str | None,
         private_key: str | None,
+        connect_timeout_seconds: float = 15.0,
     ) -> asyncssh.SSHClientConnection:
         connect_kwargs: dict[str, object] = {
             "host": host,
             "username": username,
             "port": port,
             "known_hosts": None,
+            "connect_timeout": connect_timeout_seconds,
         }
         if password:
             connect_kwargs["password"] = password
@@ -39,11 +42,21 @@ class SSHService:
                 key_path = key_file.name
             connect_kwargs["client_keys"] = [key_path]
             try:
-                return await asyncssh.connect(**connect_kwargs)
+                try:
+                    return await asyncssh.connect(**connect_kwargs)
+                except TimeoutError as exc:
+                    raise TimeoutError(
+                        f"SSH connect timed out after {int(connect_timeout_seconds)}s to {host}:{port}"
+                    ) from exc
             finally:
                 os.unlink(key_path)
 
-        return await asyncssh.connect(**connect_kwargs)
+        try:
+            return await asyncssh.connect(**connect_kwargs)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"SSH connect timed out after {int(connect_timeout_seconds)}s to {host}:{port}"
+            ) from exc
 
     async def run_command(
         self,
@@ -54,6 +67,8 @@ class SSHService:
         port: int = 22,
         password: str | None = None,
         private_key: str | None = None,
+        timeout_seconds: float = 120.0,
+        connect_timeout_seconds: float = 15.0,
     ) -> SSHCommandResult:
         async with await self._connect(
             host=host,
@@ -61,8 +76,12 @@ class SSHService:
             port=port,
             password=password,
             private_key=private_key,
+            connect_timeout_seconds=connect_timeout_seconds,
         ) as conn:
-            result = await conn.run(command, check=False)
+            try:
+                result = await asyncio.wait_for(conn.run(command, check=False), timeout=timeout_seconds)
+            except TimeoutError as exc:
+                raise TimeoutError(f"SSH command timed out after {int(timeout_seconds)}s on {host}") from exc
             return SSHCommandResult(
                 exit_status=result.exit_status,
                 stdout=result.stdout,
@@ -79,6 +98,7 @@ class SSHService:
         port: int = 22,
         password: str | None = None,
         private_key: str | None = None,
+        connect_timeout_seconds: float = 15.0,
     ) -> None:
         async with await self._connect(
             host=host,
@@ -86,6 +106,7 @@ class SSHService:
             port=port,
             password=password,
             private_key=private_key,
+            connect_timeout_seconds=connect_timeout_seconds,
         ) as conn:
             async with conn.start_sftp_client() as sftp:
                 async with sftp.open(remote_path, "w") as remote_file:

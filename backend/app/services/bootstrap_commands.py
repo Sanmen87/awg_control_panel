@@ -18,15 +18,44 @@ mkdir -p /opt/awg-control-panel
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y bash build-essential ca-certificates curl git golang-go iproute2 make pkg-config
+  apt-get install -y bash build-essential ca-certificates curl git golang-go iproute2 make pkg-config tar
 fi
+version_ge() {
+  [ "$1" = "$2" ] && return 0
+  [ "$(printf '%s\\n%s\\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+}
+map_go_arch() {
+  case "$(uname -m)" in
+    x86_64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *) echo "" ;;
+  esac
+}
 if ! command -v amneziawg-go >/dev/null 2>&1; then
   rm -rf /opt/amneziawg-go
   git clone https://github.com/amnezia-vpn/amneziawg-go /opt/amneziawg-go
+  REQUIRED_GO_VERSION="$(awk '/^go / {print $2; exit}' /opt/amneziawg-go/go.mod)"
+  CURRENT_GO_VERSION=""
+  if command -v go >/dev/null 2>&1; then
+    CURRENT_GO_VERSION="$(go version 2>/dev/null | awk '{print $3}' | sed 's/^go//')"
+  fi
+  if [ -z "$CURRENT_GO_VERSION" ] || [ -z "$REQUIRED_GO_VERSION" ] || ! version_ge "$CURRENT_GO_VERSION" "$REQUIRED_GO_VERSION"; then
+    GO_ARCH="$(map_go_arch)"
+    if [ -z "$GO_ARCH" ]; then
+      echo "Unsupported architecture for automatic Go installation: $(uname -m)" >&2
+      exit 1
+    fi
+    rm -rf /usr/local/go /tmp/go-toolchain.tar.gz
+    curl -fsSL "https://go.dev/dl/go${REQUIRED_GO_VERSION}.linux-${GO_ARCH}.tar.gz" -o /tmp/go-toolchain.tar.gz
+    tar -C /usr/local -xzf /tmp/go-toolchain.tar.gz
+    rm -f /tmp/go-toolchain.tar.gz
+    export PATH="/usr/local/go/bin:$PATH"
+  fi
   make -C /opt/amneziawg-go
   install -m 0755 /opt/amneziawg-go/amneziawg-go /usr/local/bin/amneziawg-go
 fi
 if ! command -v awg >/dev/null 2>&1; then
+  export PATH="/usr/local/go/bin:$PATH"
   rm -rf /opt/amneziawg-tools
   git clone https://github.com/amnezia-vpn/amneziawg-tools /opt/amneziawg-tools
   make -C /opt/amneziawg-tools/src
@@ -170,9 +199,19 @@ docker run -d \
   -p 51820:51820/udp \
   -v /lib/modules:/lib/modules \
   --sysctl="net.ipv4.conf.all.src_valid_mark=1" \
+  --sysctl="net.ipv4.ip_forward=1" \
   amnezia-awg
 docker network connect amnezia-dns-net amnezia-awg >/dev/null 2>&1 || true
 sysctl -w net.ipv4.ip_forward=1
+iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-USER
+iptables -C FORWARD -j DOCKER-ISOLATION-STAGE-1 2>/dev/null || iptables -A FORWARD -j DOCKER-ISOLATION-STAGE-1
+iptables -C FORWARD -o amn0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -o amn0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -C FORWARD -i amn0 ! -o amn0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i amn0 ! -o amn0 -j ACCEPT
+iptables -C FORWARD -i amn0 -o amn0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i amn0 -o amn0 -j ACCEPT
+iptables -C FORWARD -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -C FORWARD -o docker0 -j DOCKER 2>/dev/null || iptables -A FORWARD -o docker0 -j DOCKER
+iptables -C FORWARD -i docker0 ! -o docker0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i docker0 ! -o docker0 -j ACCEPT
+iptables -C FORWARD -i docker0 -o docker0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i docker0 -o docker0 -j ACCEPT
 echo 'docker bootstrap complete'
 """.strip()
 

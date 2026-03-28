@@ -250,8 +250,17 @@ def create_managed_client(
                 )
                 .first()
             )
-            if standard_node:
-                client.topology_id = standard_node.topology_id
+            proxy_node = (
+                db.query(TopologyNode)
+                .filter(
+                    TopologyNode.server_id == server.id,
+                    TopologyNode.role == TopologyNodeRole.PROXY,
+                )
+                .first()
+            )
+            topology_node = standard_node or proxy_node
+            if topology_node:
+                client.topology_id = topology_node.topology_id
                 db.add(client)
                 db.flush()
 

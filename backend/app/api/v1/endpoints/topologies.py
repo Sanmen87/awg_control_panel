@@ -24,6 +24,14 @@ from app.services.topology_renderer import RenderedConfig, TopologyRenderError, 
 router = APIRouter()
 
 
+def _ensure_supported_topology_type(topology_type: TopologyType) -> None:
+    if topology_type == TopologyType.PROXY_MULTI_EXIT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="proxy-multi-exit is reserved for a future release and is not supported yet",
+        )
+
+
 @router.get("", response_model=list[TopologyRead])
 def list_topologies(db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> list[Topology]:
     return db.query(Topology).order_by(Topology.created_at.desc()).all()
@@ -35,6 +43,7 @@ def create_topology(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> Topology:
+    _ensure_supported_topology_type(payload.type)
     topology = Topology(**payload.model_dump())
     db.add(topology)
     db.commit()
@@ -78,6 +87,8 @@ def update_topology(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topology not found")
 
     updates = payload.model_dump(exclude_unset=True)
+    if "type" in updates:
+        _ensure_supported_topology_type(updates["type"])
     for field, value in updates.items():
         setattr(topology, field, value)
 

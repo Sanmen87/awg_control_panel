@@ -40,12 +40,7 @@ class TopologyValidationService:
                 errors.append("Proxy-exit topology cannot contain standard-vpn nodes")
 
         if topology_type == TopologyType.PROXY_MULTI_EXIT:
-            if len(proxy_nodes) != 1:
-                errors.append("Proxy-multi-exit topology must contain exactly one proxy node")
-            if len(exit_nodes) < 1:
-                errors.append("Proxy-multi-exit topology must contain at least one exit node")
-            if standard_nodes:
-                errors.append("Proxy-multi-exit topology cannot contain standard-vpn nodes")
+            errors.append("Proxy-multi-exit topology is reserved for a future release and is not supported yet")
 
         if secondary_proxy_nodes:
             warnings.append("proxy-secondary nodes are reserved for future HA logic and are not active in v1")
@@ -59,4 +54,3 @@ class TopologyValidationService:
             warnings.append("Topology has no nodes attached yet")
 
         return TopologyValidationResult(topology_id=topology_id, errors=errors, warnings=warnings)
-

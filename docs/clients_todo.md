@@ -137,6 +137,9 @@
 - Tighten table spacing and responsive behavior after real browser review.
 - Review imported-peer messaging and visual differentiation.
 - Add keyboard accessibility for opening and closing client modals.
+- Revisit extended AWG profile presets after mobile clients support the Amnezia 2.0 format:
+  - return `balanced` and `aggressive` to the topology UI only after verified mobile compatibility
+  - keep `compatible` as the only exposed preset until then
 
 ## Later
 

@@ -15,6 +15,10 @@ celery_app.conf.update(
         "sync-server-runtime-metrics-every-minute": {
             "task": "app.workers.tasks.sync_server_runtime_metrics",
             "schedule": crontab(),
+        },
+        "reconcile-stale-jobs-every-minute": {
+            "task": "app.workers.tasks.reconcile_stale_jobs",
+            "schedule": crontab(),
         }
     },
 )

@@ -19,10 +19,20 @@ from app.services.topology_renderer import RenderedConfig, TopologyRenderer
 
 KEYPAIR_COMMAND = r"""
 set -e
-priv=$(awg genkey)
-pub=$(printf %s "$priv" | awg pubkey)
+if command -v awg >/dev/null 2>&1; then
+  priv=$(awg genkey)
+  pub=$(printf %s "$priv" | awg pubkey)
+elif command -v wg >/dev/null 2>&1; then
+  priv=$(wg genkey)
+  pub=$(printf %s "$priv" | wg pubkey)
+else
+  exit 44
+fi
 printf '{"private":"%s","public":"%s"}\n' "$priv" "$pub"
 """.strip()
+
+SSH_PREPARE_TIMEOUT_SECONDS = 120.0
+SSH_APPLY_TIMEOUT_SECONDS = 300.0
 
 
 class TopologyDeployer:
@@ -37,20 +47,21 @@ class TopologyDeployer:
         return match.group(1).strip() if match else None
 
     def _build_native_nat_commands(self, server: Server, config: RenderedConfig) -> list[str]:
-        if server.role != ServerRole.STANDARD_VPN:
-            return []
-
-        address = self._extract_config_value(config.content, "Address")
-        if not address:
-            return []
-
-        try:
-            network_cidr = str(ipaddress.ip_interface(address).network)
-        except ValueError:
+        network_cidr = None
+        if config.metadata and config.metadata.get("proxy_client_subnet") and config.metadata.get("proxy_exit_role") == "exit":
+            network_cidr = config.metadata.get("proxy_client_subnet")
+        elif server.role == ServerRole.STANDARD_VPN:
+            address = self._extract_config_value(config.content, "Address")
+            if address:
+                try:
+                    network_cidr = str(ipaddress.ip_interface(address).network)
+                except ValueError:
+                    network_cidr = None
+        if not network_cidr:
             return []
 
         interface = shlex.quote(config.interface_name)
-        network = shlex.quote(network_cidr)
+        network = shlex.quote(str(network_cidr))
         return [
             'UPLINK_IFACE="$(ip route show default 2>/dev/null | awk \'/default/ {print $5; exit}\')"',
             'if [ -z "${UPLINK_IFACE:-}" ]; then UPLINK_IFACE="$(ip -o route get 1.1.1.1 2>/dev/null | awk \'{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}\')"; fi',
@@ -59,14 +70,85 @@ class TopologyDeployer:
             f'if command -v iptables >/dev/null 2>&1; then iptables -C FORWARD -o {interface} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -o {interface} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; fi',
         ]
 
+    def _build_proxy_exit_proxy_routing_commands(self, config: RenderedConfig) -> list[str]:
+        if not config.metadata or config.metadata.get("proxy_exit_role") != "proxy":
+            return []
+        subnet = config.metadata.get("proxy_client_subnet")
+        if not subnet:
+            return []
+        interface = shlex.quote(config.interface_name)
+        table_id = "51820"
+        return [
+            f'while ip rule show | grep -Fq "from {subnet} lookup {table_id}"; do ip rule del from {shlex.quote(subnet)} table {table_id}; done',
+            f'ip rule add from {shlex.quote(subnet)} table {table_id}',
+            f'ip route replace {shlex.quote(subnet)} dev {interface} table {table_id}',
+            f'ip route replace default dev {interface} table {table_id}',
+        ]
+
+    def _docker_client_network(self, server: Server, config: RenderedConfig) -> str | None:
+        if config.metadata and config.metadata.get("proxy_client_subnet") and config.metadata.get("proxy_exit_role") == "exit":
+            return config.metadata.get("proxy_client_subnet")
+        if server.role != ServerRole.STANDARD_VPN:
+            return None
+
+        address = self._extract_config_value(config.content, "Address")
+        if not address:
+            return None
+
+        try:
+            return str(ipaddress.ip_interface(address).network)
+        except ValueError:
+            return None
+
+    def _build_docker_host_firewall_commands(self) -> list[str]:
+        return [
+            "sysctl -w net.ipv4.ip_forward=1",
+            "iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-USER",
+            "iptables -C FORWARD -j DOCKER-ISOLATION-STAGE-1 2>/dev/null || iptables -A FORWARD -j DOCKER-ISOLATION-STAGE-1",
+            "iptables -C FORWARD -o amn0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -o amn0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+            "iptables -C FORWARD -i amn0 ! -o amn0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i amn0 ! -o amn0 -j ACCEPT",
+            "iptables -C FORWARD -i amn0 -o amn0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i amn0 -o amn0 -j ACCEPT",
+            "iptables -C FORWARD -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+            "iptables -C FORWARD -o docker0 -j DOCKER 2>/dev/null || iptables -A FORWARD -o docker0 -j DOCKER",
+            "iptables -C FORWARD -i docker0 ! -o docker0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i docker0 ! -o docker0 -j ACCEPT",
+            "iptables -C FORWARD -i docker0 -o docker0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i docker0 -o docker0 -j ACCEPT",
+        ]
+
+    def _build_docker_container_nat_commands(self, server: Server, config: RenderedConfig) -> list[str]:
+        network_cidr = self._docker_client_network(server, config)
+        if not network_cidr:
+            return []
+
+        interface = shlex.quote(config.interface_name)
+        network = shlex.quote(network_cidr)
+        return [
+            "sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true",
+            f"iptables -C INPUT -i {interface} -j ACCEPT 2>/dev/null || iptables -A INPUT -i {interface} -j ACCEPT",
+            f"iptables -C FORWARD -i {interface} -j ACCEPT 2>/dev/null || iptables -A FORWARD -i {interface} -j ACCEPT",
+            f"iptables -C OUTPUT -o {interface} -j ACCEPT 2>/dev/null || iptables -A OUTPUT -o {interface} -j ACCEPT",
+            "iptables -C FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT",
+            f'for IFACE in eth0 eth1; do ip link show "$IFACE" >/dev/null 2>&1 || continue; iptables -C FORWARD -i {interface} -o "$IFACE" -s {network} -j ACCEPT 2>/dev/null || iptables -A FORWARD -i {interface} -o "$IFACE" -s {network} -j ACCEPT; iptables -t nat -C POSTROUTING -s {network} -o "$IFACE" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {network} -o "$IFACE" -j MASQUERADE; done',
+        ]
+
     async def generate_keypair(self, server: Server) -> tuple[str, str]:
+        command = KEYPAIR_COMMAND
+        docker_container = None
+        if server.live_runtime_details_json:
+            try:
+                docker_container = json.loads(server.live_runtime_details_json).get("docker_container")
+            except json.JSONDecodeError:
+                docker_container = None
+        if server.install_method.value == "docker" or docker_container:
+            container_name = shlex.quote(str(docker_container or "amnezia-awg"))
+            command = f"docker exec {container_name} sh -lc {shlex.quote(KEYPAIR_COMMAND)}"
+
         result = await self.ssh.run_command(
             host=server.host,
             username=server.ssh_user,
             port=server.ssh_port,
             password=self.credentials.get_ssh_password(server),
             private_key=self.credentials.get_private_key(server),
-            command=KEYPAIR_COMMAND,
+            command=command,
         )
         if result.exit_status != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to generate AWG keypair")
@@ -77,9 +159,66 @@ class TopologyDeployer:
         password = self.credentials.get_ssh_password(server)
         private_key = self.credentials.get_private_key(server)
         sudo_password = self.credentials.get_sudo_password(server)
+        docker_container = None
+        if server.live_runtime_details_json:
+            try:
+                docker_container = json.loads(server.live_runtime_details_json).get("docker_container")
+            except json.JSONDecodeError:
+                docker_container = None
         directory = shlex.quote("/etc/amnezia/amneziawg")
         remote_path = shlex.quote(config.remote_path)
         interface = shlex.quote(config.interface_name)
+
+        if server.install_method.value == "docker" or docker_container:
+            container_name = shlex.quote(str(docker_container or "amnezia-awg"))
+            remote_dir = shlex.quote(str(config.remote_path.rsplit("/", 1)[0] if "/" in config.remote_path else "/opt/amnezia/awg"))
+            container_path = shlex.quote(config.remote_path)
+            container_interface = shlex.quote(config.interface_name)
+            docker_inner_steps = [
+                f"mkdir -p {remote_dir}",
+                f"chmod 600 {container_path} 2>/dev/null || true",
+                (
+                    f"if command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1; then "
+                    f"(wg-quick down {container_path} || true) && wg-quick up {container_path}; "
+                    f"elif command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then "
+                    f"(awg-quick down {container_path} || true) && awg-quick up {container_path}; "
+                    f"else exit 44; fi"
+                ),
+                *self._build_docker_container_nat_commands(server, config),
+            ]
+            host_steps = [
+                "set -e",
+                *self._build_docker_host_firewall_commands(),
+                *self._build_proxy_exit_proxy_routing_commands(config),
+                f"docker exec {container_name} sh -lc 'mkdir -p {remote_dir}'",
+                f"docker cp /tmp/{config.interface_name}.conf {container_name}:{container_path}",
+                f"docker exec {container_name} sh -lc {shlex.quote(' && '.join(docker_inner_steps))}",
+                f"rm -f /tmp/{config.interface_name}.conf",
+            ]
+            prepare_command = wrap_with_optional_sudo(
+                " && ".join(host_steps),
+                sudo_password,
+            )
+            await self.ssh.upload_text_file(
+                host=server.host,
+                username=server.ssh_user,
+                port=server.ssh_port,
+                password=password,
+                private_key=private_key,
+                remote_path=f"/tmp/{config.interface_name}.conf",
+                content=config.content,
+            )
+            result = await self.ssh.run_command(
+                host=server.host,
+                username=server.ssh_user,
+                port=server.ssh_port,
+                password=password,
+                private_key=private_key,
+                command=prepare_command,
+            )
+            if result.exit_status != 0:
+                raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to apply docker config")
+            return
 
         prepare_command = wrap_with_optional_sudo(
             f"mkdir -p {directory} && chmod 700 {directory}",
@@ -92,6 +231,7 @@ class TopologyDeployer:
             password=password,
             private_key=private_key,
             command=prepare_command,
+            timeout_seconds=SSH_PREPARE_TIMEOUT_SECONDS,
         )
         if result.exit_status != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to prepare config directory")
@@ -116,18 +256,25 @@ class TopologyDeployer:
                     f"awg-quick down {interface} || true",
                     f"awg-quick up {interface}",
                     *self._build_native_nat_commands(server, config),
+                    *self._build_proxy_exit_proxy_routing_commands(config),
                 ]
             ),
             sudo_password,
         )
-        result = await self.ssh.run_command(
-            host=server.host,
-            username=server.ssh_user,
-            port=server.ssh_port,
-            password=password,
-            private_key=private_key,
-            command=apply_command,
-        )
+        try:
+            result = await self.ssh.run_command(
+                host=server.host,
+                username=server.ssh_user,
+                port=server.ssh_port,
+                password=password,
+                private_key=private_key,
+                command=apply_command,
+                timeout_seconds=SSH_APPLY_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"Timed out while applying {config.interface_name} on {server.name} ({server.host})"
+            ) from exc
         if result.exit_status != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to apply config")
 
@@ -162,19 +309,31 @@ class TopologyDeployer:
 
         backup_suffix = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
         if docker_container:
-            apply_command = (
-                "set -e && "
-                f"docker exec {shlex.quote(docker_container)} sh -lc "
-                f"\"cp {shlex.quote(config.remote_path)} {shlex.quote(config.remote_path)}.bak.{backup_suffix} 2>/dev/null || true\" && "
-                f"docker cp {shlex.quote(temp_remote)} {shlex.quote(docker_container)}:{shlex.quote(config.remote_path)} && "
-                f"docker exec {shlex.quote(docker_container)} sh -lc "
-                f"\"if command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1; then "
-                f"tmp=$(mktemp) && wg-quick strip {shlex.quote(config.remote_path)} > \\\"$tmp\\\" && wg syncconf {shlex.quote(config.interface_name)} \\\"$tmp\\\" && rm -f \\\"$tmp\\\"; "
-                f"elif command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then "
-                f"tmp=$(mktemp) && awg-quick strip {shlex.quote(config.remote_path)} > \\\"$tmp\\\" && awg syncconf {shlex.quote(config.interface_name)} \\\"$tmp\\\" && rm -f \\\"$tmp\\\"; "
-                f"else exit 44; fi\" || docker restart {shlex.quote(docker_container)} && "
-                f"rm -f {shlex.quote(temp_remote)}"
-            )
+            container_path = shlex.quote(config.remote_path)
+            container_interface = shlex.quote(config.interface_name)
+            docker_inner_steps = [
+                f"chmod 600 {container_path} 2>/dev/null || true",
+                (
+                    f"if command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1; then "
+                    f"(wg-quick down {container_path} || true) && wg-quick up {container_path}; "
+                    f"elif command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then "
+                    f"(awg-quick down {container_path} || true) && awg-quick up {container_path}; "
+                    f"else exit 44; fi"
+                ),
+                *self._build_docker_container_nat_commands(server, config),
+                f"if command -v awg >/dev/null 2>&1; then awg show {container_interface} >/dev/null 2>&1 || true; elif command -v wg >/dev/null 2>&1; then wg show {container_interface} >/dev/null 2>&1 || true; fi",
+            ]
+            host_steps = [
+                "set -e",
+                *self._build_docker_host_firewall_commands(),
+                *self._build_proxy_exit_proxy_routing_commands(config),
+                f"docker exec {shlex.quote(docker_container)} sh -lc \"cp {shlex.quote(config.remote_path)} {shlex.quote(config.remote_path)}.bak.{backup_suffix} 2>/dev/null || true\"",
+                f"docker cp {shlex.quote(temp_remote)} {shlex.quote(docker_container)}:{shlex.quote(config.remote_path)}",
+                f"docker exec {shlex.quote(docker_container)} sh -lc {shlex.quote(' && '.join(docker_inner_steps))}",
+                f"rm -f {shlex.quote(temp_remote)}",
+            ]
+            apply_command = " && ".join(host_steps)
+            apply_command = wrap_with_optional_sudo(apply_command, sudo_password)
         else:
             directory = shlex.quote(str(config.remote_path.rsplit('/', 1)[0] if '/' in config.remote_path else "/etc/amnezia/amneziawg"))
             remote_path = shlex.quote(config.remote_path)
@@ -188,20 +347,27 @@ class TopologyDeployer:
                 f"(awg-quick down {interface} || wg-quick down {interface} || true)",
                 f"(awg-quick up {interface} || wg-quick up {interface})",
                 *self._build_native_nat_commands(server, config),
+                *self._build_proxy_exit_proxy_routing_commands(config),
             ]
             apply_command = wrap_with_optional_sudo(
                 " && ".join(native_steps),
                 sudo_password,
             )
 
-        result = await self.ssh.run_command(
-            host=server.host,
-            username=server.ssh_user,
-            port=server.ssh_port,
-            password=password,
-            private_key=private_key,
-            command=apply_command,
-        )
+        try:
+            result = await self.ssh.run_command(
+                host=server.host,
+                username=server.ssh_user,
+                port=server.ssh_port,
+                password=password,
+                private_key=private_key,
+                command=apply_command,
+                timeout_seconds=SSH_APPLY_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"Timed out while applying imported config {config.interface_name} on {server.name} ({server.host})"
+            ) from exc
         if result.exit_status != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to apply adopted imported config")
 
@@ -211,6 +377,7 @@ class TopologyDeployer:
         nodes: list[TopologyNode],
         servers_by_id: dict[int, Server],
         clients: list[Client] | None = None,
+        progress_callback: callable | None = None,
     ) -> list[RenderedConfig]:
         key_cache: dict[tuple[int, int, str], tuple[str, str, str, str]] = {}
 
@@ -266,10 +433,20 @@ class TopologyDeployer:
                     {standard_server.id: standard_server},
                     key_provider=lambda *_args: (standard_private, "", "", ""),
                 )
-        else:
+        elif topology.type == TopologyType.PROXY_EXIT:
             # Render synchronously after preparing real keys.
-            for node in sorted([item for item in nodes if item.role.value == "exit"], key=lambda item: item.priority):
-                proxy_node = next(item for item in nodes if item.role.value == "proxy")
+            proxy_node = next((item for item in nodes if item.role == TopologyNodeRole.PROXY), None)
+            if not proxy_node:
+                raise RuntimeError("Proxy-exit topology must contain exactly one proxy node")
+
+            exit_nodes = sorted(
+                [item for item in nodes if item.role == TopologyNodeRole.EXIT],
+                key=lambda item: item.priority,
+            )
+            if not exit_nodes:
+                raise RuntimeError("Proxy-exit topology must contain at least one exit node")
+
+            for node in exit_nodes:
                 proxy_server = servers_by_id[proxy_node.server_id]
                 exit_server = servers_by_id[node.server_id]
                 interface_name = f"awg{node.priority}"
@@ -286,12 +463,20 @@ class TopologyDeployer:
                         key_provider=lambda *_args: (proxy_private, proxy_public, exit_private, exit_public),
                     )
                 )
+        else:
+            raise RuntimeError(f"Unsupported topology type for deploy: {topology.type.value}")
 
         for config in rendered:
             server = servers_by_id[config.server_id]
+            if progress_callback:
+                progress_callback(
+                    f"Applying {config.interface_name} on {server.name} ({server.host})"
+                )
             if not server.awg_detected:
                 raise RuntimeError(f"AWG runtime not detected on server {server.name}")
-            if topology.type == TopologyType.STANDARD and server.config_source == "imported":
+            if (topology.type == TopologyType.STANDARD and server.config_source == "imported") or (
+                config.metadata and config.metadata.get("preserve_existing") == "1"
+            ):
                 await self.upload_and_apply_adopted_standard(server, config)
             else:
                 await self.upload_and_apply(server, config)
@@ -304,6 +489,7 @@ def deploy_topology_sync(
     nodes: list[TopologyNode],
     servers_by_id: dict[int, Server],
     clients: list[Client] | None = None,
+    progress_callback: callable | None = None,
 ) -> list[RenderedConfig]:
     # Worker entrypoint uses a sync wrapper around the async SSH deploy orchestration.
-    return asyncio.run(TopologyDeployer().deploy(topology, nodes, servers_by_id, clients))
+    return asyncio.run(TopologyDeployer().deploy(topology, nodes, servers_by_id, clients, progress_callback))

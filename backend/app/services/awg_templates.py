@@ -25,7 +25,7 @@ def render_link_config(
     ]
     for key in AWG_PROFILE_FIELD_ORDER:
         value = (extra_interface_fields or {}).get(key)
-        if value:
+        if value and str(value).strip() not in {"0", "0.0"}:
             lines.append(f"{key} = {value}")
     lines.extend(
         [
@@ -60,6 +60,6 @@ def render_standard_server_config(
     ]
     for key in AWG_PROFILE_FIELD_ORDER:
         value = (extra_interface_fields or {}).get(key)
-        if value:
+        if value and str(value).strip() not in {"0", "0.0"}:
             lines.append(f"{key} = {value}")
     return "\n".join(lines) + "\n"

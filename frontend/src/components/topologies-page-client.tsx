@@ -70,7 +70,10 @@ type ValidationResult = {
 
 type Job = {
   id: number;
+  job_type?: string;
   status: string;
+  topology_id?: number | null;
+  result_message?: string | null;
 };
 
 type FailoverForm = {
@@ -138,11 +141,12 @@ export function TopologiesPageClient() {
   const [servers, setServers] = useState<Server[]>([]);
   const [topologies, setTopologies] = useState<Topology[]>([]);
   const [nodes, setNodes] = useState<TopologyNode[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedTopologyId, setSelectedTopologyId] = useState<number | null>(null);
   const [createForm, setCreateForm] = useState(initialCreateForm);
   const [editorName, setEditorName] = useState("");
   const [editorType, setEditorType] = useState("standard");
-  const [editorAwgProfile, setEditorAwgProfile] = useState("balanced");
+  const [editorAwgProfile, setEditorAwgProfile] = useState("compatible");
   const [failoverForm, setFailoverForm] = useState<FailoverForm>(DEFAULT_FAILOVER);
   const [standardServerId, setStandardServerId] = useState("");
   const [proxyServerId, setProxyServerId] = useState("");
@@ -194,9 +198,7 @@ export function TopologiesPageClient() {
           proxyMultiExit: "Один proxy и несколько exit с приоритетами переключения."
         },
         profiles: {
-          compatible: "compatible",
-          balanced: "balanced",
-          aggressive: "aggressive dpi evasion"
+          compatible: "compatible"
         },
         actions: {
           saveTopology: "Сохранить topology",
@@ -240,7 +242,8 @@ export function TopologiesPageClient() {
         },
         helperImported:
           "Этот сервер уже работает со своей конфигурацией. Топология будет опираться на импортированный live config, а не на новый шаблон панели.",
-        noImportedConfig: "Для выбранного сервера live config еще не импортирован."
+        noImportedConfig: "Для выбранного сервера live config еще не импортирован.",
+        latestJob: "Последняя deploy-задача"
       }
     : {
         title: "Build topologies step by step and convert them safely between supported types.",
@@ -282,9 +285,7 @@ export function TopologiesPageClient() {
           proxyMultiExit: "One proxy with multiple exits and ordered failover."
         },
         profiles: {
-          compatible: "compatible",
-          balanced: "balanced",
-          aggressive: "aggressive dpi evasion"
+          compatible: "compatible"
         },
         actions: {
           saveTopology: "Save topology",
@@ -329,6 +330,7 @@ export function TopologiesPageClient() {
           "This server is already running with its own configuration. The topology will use the imported live config instead of generating a fresh panel template.",
         noImportedConfig: "The selected server does not have an imported live config yet.",
         queued: "Last queued job",
+        latestJob: "Latest deploy job",
         confirmDelete: "Delete this topology completely? All nodes inside it will be removed as well."
       };
 
@@ -342,14 +344,16 @@ export function TopologiesPageClient() {
       return;
     }
     try {
-      const [nextServers, nextTopologies, nextNodes] = await Promise.all([
+      const [nextServers, nextTopologies, nextNodes, nextJobs] = await Promise.all([
         apiRequest<Server[]>("/servers", { token }),
         apiRequest<Topology[]>("/topologies", { token }),
-        apiRequest<TopologyNode[]>("/topology-nodes", { token })
+        apiRequest<TopologyNode[]>("/topology-nodes", { token }),
+        apiRequest<Job[]>("/jobs", { token })
       ]);
       setServers(nextServers);
       setTopologies(nextTopologies);
       setNodes(nextNodes);
+      setJobs(nextJobs);
       setError(null);
 
       if (!selectedTopologyId && nextTopologies.length > 0) {
@@ -418,6 +422,13 @@ export function TopologiesPageClient() {
     return [...(nodesByTopology[selectedTopologyId] ?? [])].sort((left, right) => left.priority - right.priority);
   }, [nodesByTopology, selectedTopologyId]);
 
+  const latestDeployJob = useMemo(() => {
+    if (!selectedTopology) {
+      return null;
+    }
+    return jobs.find((job) => job.job_type === "deploy-topology" && job.topology_id === selectedTopology.id) ?? null;
+  }, [jobs, selectedTopology]);
+
   function parseRuntimeDetails(server: Server | null): LiveRuntimeDetails | null {
     if (!server?.live_runtime_details_json) {
       return null;
@@ -446,7 +457,7 @@ export function TopologiesPageClient() {
     if (!selectedTopology) {
       setEditorName("");
       setEditorType("standard");
-      setEditorAwgProfile("balanced");
+      setEditorAwgProfile("compatible");
       setFailoverForm(DEFAULT_FAILOVER);
       setStandardServerId("");
       setProxyServerId("");
@@ -455,8 +466,8 @@ export function TopologiesPageClient() {
     }
 
     setEditorName(selectedTopology.name);
-    setEditorType(selectedTopology.type);
-    setEditorAwgProfile(parseTopologyMetadata(selectedTopology.metadata_json).awg_profile_name ?? "balanced");
+    setEditorType(selectedTopology.type === "proxy-multi-exit" ? "proxy-exit" : selectedTopology.type);
+    setEditorAwgProfile(parseTopologyMetadata(selectedTopology.metadata_json).awg_profile_name ?? "compatible");
     setFailoverForm(parseFailoverConfig(selectedTopology.failover_config_json));
 
     const standardNode = selectedNodes.find((node) => node.role === "standard-vpn");
@@ -499,7 +510,7 @@ export function TopologiesPageClient() {
           name: createForm.name,
           type: createForm.type,
           failover_config_json: stringifyFailoverConfig(DEFAULT_FAILOVER),
-          metadata_json: JSON.stringify({ awg_profile_name: "balanced" })
+          metadata_json: JSON.stringify({ awg_profile_name: "compatible" })
         }
       });
       setCreateForm(initialCreateForm);
@@ -624,11 +635,6 @@ export function TopologiesPageClient() {
             continue;
           }
           await removeNode(node.id);
-        }
-      } else if (nextType === "proxy-multi-exit") {
-        const keeperProxy = proxyNode ?? standardNode ?? currentNodes[0];
-        if (keeperProxy) {
-          await updateNode(keeperProxy.id, "proxy", 10);
         }
       }
 
@@ -797,17 +803,37 @@ export function TopologiesPageClient() {
       return;
     }
     try {
+      setSaving(true);
+      setError(null);
       const job = await apiRequest<Job>(`/topologies/${selectedTopology.id}/deploy`, {
         method: "POST",
         token
       });
       setInfo(`${copy.queued}: #${job.id}`);
-      for (let attempt = 0; attempt < 4; attempt += 1) {
+
+      let finalJob = job;
+      for (let attempt = 0; attempt < 80; attempt += 1) {
         await sleep(1500);
+        finalJob = await apiRequest<Job>(`/jobs/${job.id}`, { token });
         await loadData();
+        if (finalJob.status === "succeeded") {
+          setInfo(finalJob.result_message || `${copy.queued}: #${job.id}`);
+          return;
+        }
+        if (finalJob.status === "failed") {
+          throw new Error(finalJob.result_message || "Topology deploy failed");
+        }
       }
+
+      setInfo(
+        locale === "ru"
+          ? `Задача #${job.id} всё ещё выполняется. Открой Jobs для подробностей.`
+          : `Job #${job.id} is still running. Open Jobs for details.`
+      );
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Failed to deploy topology");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -898,7 +924,6 @@ export function TopologiesPageClient() {
                 >
                   <option value="standard">{copy.types.standard}</option>
                   <option value="proxy-exit">{copy.types.proxyExit}</option>
-                  <option value="proxy-multi-exit">{copy.types.proxyMultiExit}</option>
                 </select>
               </label>
               <button type="submit" className="primary-button" disabled={saving}>
@@ -935,26 +960,21 @@ export function TopologiesPageClient() {
                     <select value={editorType} onChange={(event) => setEditorType(event.target.value)}>
                       <option value="standard">{copy.types.standard}</option>
                       <option value="proxy-exit">{copy.types.proxyExit}</option>
-                      <option value="proxy-multi-exit">{copy.types.proxyMultiExit}</option>
                     </select>
                   </label>
                   <label className="field">
                     <span>{copy.fields.awgProfile}</span>
                     <select value={editorAwgProfile} onChange={(event) => setEditorAwgProfile(event.target.value)}>
                       <option value="compatible">{copy.profiles.compatible}</option>
-                      <option value="balanced">{copy.profiles.balanced}</option>
-                      <option value="aggressive">{copy.profiles.aggressive}</option>
                     </select>
                   </label>
                 </div>
                 <div className="topology-type-card">
-                  <strong>{copy.types[editorType === "proxy-exit" ? "proxyExit" : editorType === "proxy-multi-exit" ? "proxyMultiExit" : "standard"]}</strong>
+                  <strong>{copy.types[editorType === "proxy-exit" ? "proxyExit" : "standard"]}</strong>
                   <p>
                     {editorType === "proxy-exit"
                       ? copy.descriptions.proxyExit
-                      : editorType === "proxy-multi-exit"
-                        ? copy.descriptions.proxyMultiExit
-                        : copy.descriptions.standard}
+                      : copy.descriptions.standard}
                   </p>
                 </div>
                 <div className="action-row">
@@ -1187,6 +1207,27 @@ export function TopologiesPageClient() {
                     {copy.actions.deploy}
                   </button>
                 </div>
+
+                {latestDeployJob ? (
+                  <div className="node-summary">
+                    <span className="eyebrow">{copy.latestJob}</span>
+                    <div className="server-meta">
+                      <span>#{latestDeployJob.id}</span>
+                      <span
+                        className={
+                          latestDeployJob.status === "succeeded"
+                            ? "status-badge status-succeeded"
+                            : latestDeployJob.status === "failed"
+                              ? "status-badge status-failed"
+                              : "status-badge status-pending"
+                        }
+                      >
+                        {latestDeployJob.status}
+                      </span>
+                    </div>
+                    {latestDeployJob.result_message ? <pre className="log-box">{latestDeployJob.result_message}</pre> : null}
+                  </div>
+                ) : null}
 
                 <div className="preview-box">
                   <span className="eyebrow">{copy.labels.previewFiles}</span>

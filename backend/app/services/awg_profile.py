@@ -79,7 +79,7 @@ AWG_PROFILE_PRESETS = {
     },
 }
 
-DEFAULT_AWG_PROFILE_NAME = "balanced"
+DEFAULT_AWG_PROFILE_NAME = "compatible"
 DEFAULT_AWG_PROFILE = AWG_PROFILE_PRESETS[DEFAULT_AWG_PROFILE_NAME]
 
 
@@ -159,7 +159,7 @@ class AWGProfileService:
             if in_interface and not inserted:
                 for key in AWG_PROFILE_FIELD_ORDER:
                     value = normalized_fields.get(key)
-                    if value:
+                    if value and str(value).strip() not in {"0", "0.0"}:
                         result.append(f"{key} = {value}")
                 inserted = True
 

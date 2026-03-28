@@ -12,6 +12,7 @@ class ParsedPeerBlock:
     public_key: str
     fields: dict[str, str]
     field_order: list[str]
+    raw_lines: list[str]
 
 
 @dataclass
@@ -79,7 +80,14 @@ class StandardConfigAdopter:
                 fields[normalized_key] = value.strip()
                 field_order.append(normalized_key)
             public_key = fields.get("PublicKey", "")
-            peers.append(ParsedPeerBlock(public_key=public_key, fields=fields, field_order=field_order))
+            peers.append(
+                ParsedPeerBlock(
+                    public_key=public_key,
+                    fields=fields,
+                    field_order=field_order,
+                    raw_lines=list(current_peer_lines),
+                )
+            )
             current_peer_lines = []
 
         for raw_line in config_text.splitlines():
@@ -170,9 +178,13 @@ class StandardConfigAdopter:
             blocks.append("\n".join(peer_lines))
 
         for peer in parsed.peers:
-            if has_panel_clients:
+            is_service_peer = any("service-exit-peer" in line for line in peer.raw_lines)
+            if has_panel_clients and not is_service_peer:
                 continue
             if not peer.public_key or peer.public_key in matched_public_keys:
+                continue
+            if is_service_peer:
+                blocks.append("\n".join(peer.raw_lines).strip())
                 continue
             peer_lines = ["[Peer]"]
             for key in peer.field_order:
@@ -181,5 +193,30 @@ class StandardConfigAdopter:
                     peer_lines.append(f"{key} = {value}")
             if len(peer_lines) > 1:
                 blocks.append("\n".join(peer_lines))
+
+        return "\n\n".join(blocks).strip() + "\n"
+
+    def render_with_service_peer(self, config_text: str, service_peer_block: str) -> str:
+        parsed = self.parse(config_text)
+        incoming = self.parse(service_peer_block)
+        service_peer = incoming.peers[0] if incoming.peers else None
+        if not service_peer or not service_peer.public_key:
+            return config_text
+
+        interface_block = "\n".join(parsed.interface_lines).strip()
+        blocks: list[str] = [interface_block] if interface_block else ["[Interface]"]
+
+        replaced = False
+        for peer in parsed.peers:
+            is_service_peer = any("service-exit-peer" in line for line in peer.raw_lines)
+            if is_service_peer or peer.public_key == service_peer.public_key:
+                if not replaced:
+                    blocks.append("\n".join(service_peer.raw_lines).strip())
+                    replaced = True
+                continue
+            blocks.append("\n".join(peer.raw_lines).strip())
+
+        if not replaced:
+            blocks.append("\n".join(service_peer.raw_lines).strip())
 
         return "\n\n".join(blocks).strip() + "\n"

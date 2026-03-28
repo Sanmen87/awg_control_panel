@@ -3,14 +3,14 @@ import json
 import re
 from pathlib import Path
 import tarfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
 from app.models.backup import BackupJob, BackupStatus
 from app.models.client import Client
 from app.db.session import SessionLocal
-from app.models.job import DeploymentJob, JobStatus
+from app.models.job import DeploymentJob, JobStatus, JobType
 from app.models.server import AWGStatus, AccessStatus, InstallMethod, Server, ServerStatus
 from app.models.topology import Topology, TopologyStatus, TopologyType
 from app.models.topology_node import TopologyNode
@@ -39,12 +39,14 @@ def _extract_rendered_config_value(content: str, key: str) -> str | None:
 
 
 def _persist_generated_standard_server_state(db: Session, topology: Topology | None, rendered_files: list) -> None:
-    if not topology or topology.type != TopologyType.STANDARD:
+    if not topology or topology.type not in {TopologyType.STANDARD, TopologyType.PROXY_EXIT}:
         return
     profile_service = AWGProfileService()
     for rendered in rendered_files:
         server = db.query(Server).filter(Server.id == rendered.server_id).first()
-        if not server or server.config_source == "imported":
+        if not server:
+            continue
+        if topology.type == TopologyType.STANDARD and server.config_source == "imported":
             continue
         try:
             runtime_details = json.loads(server.live_runtime_details_json) if server.live_runtime_details_json else {}
@@ -57,7 +59,10 @@ def _persist_generated_standard_server_state(db: Session, topology: Topology | N
         runtime_details["config_path"] = rendered.remote_path
         runtime_details["peer_count"] = str(rendered.content.count("[Peer]"))
 
-        server.config_source = "generated"
+        if topology.type == TopologyType.PROXY_EXIT and rendered.metadata and rendered.metadata.get("proxy_exit_role") == "exit":
+            server.config_source = "imported"
+        else:
+            server.config_source = "generated"
         server.live_interface_name = rendered.interface_name
         server.live_config_path = rendered.remote_path
         server.live_address_cidr = _extract_rendered_config_value(rendered.content, "Address")
@@ -81,6 +86,29 @@ def _update_job(job_id: int, *, status: JobStatus, result_message: str) -> None:
         db.commit()
     finally:
         db.close()
+
+
+def _update_job_message(job_id: int, result_message: str) -> None:
+    db: Session = SessionLocal()
+    try:
+        job = db.query(DeploymentJob).filter(DeploymentJob.id == job_id).first()
+        if not job:
+            return
+        job.result_message = result_message
+        db.add(job)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _stale_job_timeout(job: DeploymentJob) -> timedelta:
+    if job.job_type == JobType.DEPLOY_TOPOLOGY:
+        return timedelta(minutes=20)
+    if job.job_type == JobType.BOOTSTRAP_SERVER:
+        return timedelta(minutes=45)
+    if job.job_type == JobType.BACKUP:
+        return timedelta(minutes=30)
+    return timedelta(minutes=10)
 
 
 def _load_job_and_server(job_id: int) -> tuple[Session, DeploymentJob | None, Server | None]:
@@ -123,6 +151,7 @@ def bootstrap_server(job_id: int) -> None:
                 password=creds.get_ssh_password(server),
                 private_key=creds.get_private_key(server),
                 command=command,
+                timeout_seconds=1800,
             )
         )
         if result.exit_status == 0:
@@ -134,6 +163,7 @@ def bootstrap_server(job_id: int) -> None:
                     password=creds.get_ssh_password(server),
                     private_key=creds.get_private_key(server),
                     command=DETECT_AWG_COMMAND,
+                    timeout_seconds=120,
                 )
             )
             if detect_result.exit_status != 0:
@@ -258,7 +288,13 @@ def deploy_topology(job_id: int) -> None:
         db.add(job)
         db.commit()
 
-        rendered_files = deploy_topology_sync(topology, nodes, servers_by_id, clients)
+        rendered_files = deploy_topology_sync(
+            topology,
+            nodes,
+            servers_by_id,
+            clients,
+            progress_callback=lambda message: _update_job_message(job_id, message),
+        )
         _persist_generated_standard_server_state(db, topology, rendered_files)
         result_lines = [f"{item.remote_path}: {len(item.content.splitlines())} lines" for item in rendered_files]
 
@@ -274,8 +310,9 @@ def deploy_topology(job_id: int) -> None:
         job = db.query(DeploymentJob).filter(DeploymentJob.id == job_id).first()
         topology = db.query(Topology).filter(Topology.id == job.topology_id).first() if job and job.topology_id else None
         if job:
+            error_message = str(exc).strip() or f"{type(exc).__name__} raised during topology deploy"
             job.status = JobStatus.FAILED
-            job.result_message = str(exc)
+            job.result_message = error_message
             db.add(job)
             if topology:
                 topology.status = TopologyStatus.ERROR
@@ -465,5 +502,35 @@ def sync_server_runtime_metrics() -> None:
     except Exception:  # noqa: BLE001
         db.rollback()
         raise
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.reconcile_stale_jobs")
+def reconcile_stale_jobs() -> None:
+    db: Session = SessionLocal()
+    try:
+        now = datetime.now(UTC)
+        candidates = (
+            db.query(DeploymentJob)
+            .filter(DeploymentJob.status.in_([JobStatus.PENDING, JobStatus.RUNNING]))
+            .all()
+        )
+        for job in candidates:
+            if not job.updated_at:
+                continue
+            if now - job.updated_at < _stale_job_timeout(job):
+                continue
+            job.status = JobStatus.FAILED
+            job.result_message = (
+                f"Job was marked failed by stale-job reconciler after exceeding the timeout for {job.job_type.value}"
+            )
+            db.add(job)
+            if job.topology_id:
+                topology = db.query(Topology).filter(Topology.id == job.topology_id).first()
+                if topology and topology.status == TopologyStatus.PENDING:
+                    topology.status = TopologyStatus.ERROR
+                    db.add(topology)
+        db.commit()
     finally:
         db.close()
