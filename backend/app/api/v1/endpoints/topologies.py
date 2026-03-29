@@ -120,7 +120,15 @@ def validate_topology(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topology not found")
 
     nodes = db.query(TopologyNode).filter(TopologyNode.topology_id == topology_id).all()
-    result = TopologyValidationService().validate(topology.id, topology.type, nodes)
+    servers = db.query(Server).filter(Server.id.in_([node.server_id for node in nodes])).all() if nodes else []
+    servers_by_id = {server.id: server for server in servers}
+    result = TopologyValidationService().validate(
+        topology.id,
+        topology.type,
+        nodes,
+        servers_by_id=servers_by_id,
+        topology_metadata_json=topology.metadata_json,
+    )
     return TopologyValidationResponse(
         topology_id=result.topology_id,
         is_valid=result.is_valid,
@@ -140,11 +148,17 @@ def get_deploy_preview(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topology not found")
 
     nodes = db.query(TopologyNode).filter(TopologyNode.topology_id == topology_id).all()
-    validation = TopologyValidationService().validate(topology.id, topology.type, nodes)
-    if not validation.is_valid:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="; ".join(validation.errors))
     servers = db.query(Server).filter(Server.id.in_([node.server_id for node in nodes])).all() if nodes else []
     servers_by_id = {server.id: server for server in servers}
+    validation = TopologyValidationService().validate(
+        topology.id,
+        topology.type,
+        nodes,
+        servers_by_id=servers_by_id,
+        topology_metadata_json=topology.metadata_json,
+    )
+    if not validation.is_valid:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="; ".join(validation.errors))
     proxy_node = next((node for node in nodes if node.role == TopologyNodeRole.PROXY), None)
     exit_nodes = [node for node in nodes if node.role == TopologyNodeRole.EXIT]
     standard_node = next((node for node in nodes if node.role == TopologyNodeRole.STANDARD_VPN), None)
@@ -214,7 +228,15 @@ def deploy_topology(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topology not found")
 
     nodes = db.query(TopologyNode).filter(TopologyNode.topology_id == topology_id).all()
-    validation = TopologyValidationService().validate(topology.id, topology.type, nodes)
+    servers = db.query(Server).filter(Server.id.in_([node.server_id for node in nodes])).all() if nodes else []
+    servers_by_id = {server.id: server for server in servers}
+    validation = TopologyValidationService().validate(
+        topology.id,
+        topology.type,
+        nodes,
+        servers_by_id=servers_by_id,
+        topology_metadata_json=topology.metadata_json,
+    )
     if not validation.is_valid:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="; ".join(validation.errors))
 

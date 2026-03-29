@@ -80,6 +80,17 @@
   - `go`
   - `custom`
 - `runtime_flavor` support in server model and UI.
+- Bootstrap now re-inspects live AWG runtime automatically after install.
+- Managed-clients server picker now excludes `exit` nodes from `proxy + 1 exit` topologies.
+
+### Topologies
+
+- `proxy + 1 exit` flow now uses separate interfaces on proxy:
+  - `awg0` for proxy clients
+  - `awgN` for proxy-to-exit service links
+- Service peer is injected into the exit live config without replacing existing normal exit peers.
+- Proxy-side policy routing now uses a dedicated table per exit priority.
+- Validation now blocks `proxy + 1 exit` if the chosen exit already has peer `AllowedIPs` overlapping the proxy client subnet.
 
 ### UI
 
@@ -137,9 +148,16 @@
 - Tighten table spacing and responsive behavior after real browser review.
 - Review imported-peer messaging and visual differentiation.
 - Add keyboard accessibility for opening and closing client modals.
+- Add explicit UI messaging when a topology server is hidden from managed-client creation because it is an `exit` node.
 - Revisit extended AWG profile presets after mobile clients support the Amnezia 2.0 format:
   - return `balanced` and `aggressive` to the topology UI only after verified mobile compatibility
   - keep `compatible` as the only exposed preset until then
+
+### Proxy + Exit Hardening
+
+- Ensure proxy-side stale `MASQUERADE` rules are always removed during topology re-apply, including old manual or legacy leftovers.
+- Add an automatic cleanup/migration path for existing broken `proxy + 1 exit` deployments where service peer was previously written into proxy `awg0`.
+- Add end-to-end verification that a managed client created on proxy really exits with the selected exit node public IP.
 
 ## Later
 

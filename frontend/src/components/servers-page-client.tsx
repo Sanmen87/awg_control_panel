@@ -77,6 +77,10 @@ const initialForm = {
   sudo_password: ""
 };
 
+function hasServiceExitPeer(configPreview?: string | null) {
+  return typeof configPreview === "string" && configPreview.includes("# service-exit-peer");
+}
+
 export function ServersPageClient() {
   const { token, logout } = useAuth();
   const { locale } = useLocale();
@@ -218,9 +222,11 @@ export function ServersPageClient() {
           return acc;
         }, {})
       );
-      setInstallMethodByServer(
+      setInstallMethodByServer((current) =>
         nextServers.reduce<Record<number, string>>((acc, server) => {
-          acc[server.id] = server.install_method === "go" || server.install_method === "native" ? "go" : "docker";
+          acc[server.id] =
+            current[server.id]
+            ?? (server.install_method === "go" || server.install_method === "native" ? "go" : "docker");
           return acc;
         }, {})
       );
@@ -567,6 +573,7 @@ export function ServersPageClient() {
                 const flag = flagForCountry(metadata?.country_code);
                 const flagTitle = geoTitle(metadata);
                 const clientCount = server.live_peer_count ?? details?.peers?.length ?? 0;
+                const servicePeerPresent = hasServiceExitPeer(details?.config_preview);
                 const needsInstall = server.access_status === "ok" && !server.awg_detected;
                 return (
                   <article key={server.id} className="server-card">
@@ -711,6 +718,10 @@ export function ServersPageClient() {
                         <summary>{copy.labels.config}</summary>
                         <pre className="log-box">{details.config_preview}</pre>
                       </details>
+                    ) : null}
+
+                    {servicePeerPresent ? (
+                      <div className="info-box">service-peer: topology link present in live config</div>
                     ) : null}
 
                     <details className="preview-item server-details-block">

@@ -27,6 +27,7 @@ from app.services.server_credentials import ServerCredentialsService
 from app.services.clients_table import ClientsTableService
 from app.services.server_metrics import ServerMetricsService
 from app.services.ssh import SSHService
+from app.services.standard_config_inspector import StandardConfigInspector
 from app.services.topology_deployer import deploy_topology_sync
 from app.services.topology_renderer import TopologyRenderer
 from app.workers.celery_app import celery_app
@@ -46,6 +47,8 @@ def _persist_generated_standard_server_state(db: Session, topology: Topology | N
         server = db.query(Server).filter(Server.id == rendered.server_id).first()
         if not server:
             continue
+        if rendered.metadata and rendered.metadata.get("preserve_server_runtime") == "1":
+            continue
         if topology.type == TopologyType.STANDARD and server.config_source == "imported":
             continue
         try:
@@ -59,9 +62,7 @@ def _persist_generated_standard_server_state(db: Session, topology: Topology | N
         runtime_details["config_path"] = rendered.remote_path
         runtime_details["peer_count"] = str(rendered.content.count("[Peer]"))
 
-        if topology.type == TopologyType.PROXY_EXIT and rendered.metadata and rendered.metadata.get("proxy_exit_role") == "exit":
-            server.config_source = "imported"
-        else:
+        if not (rendered.metadata and rendered.metadata.get("preserve_existing") == "1"):
             server.config_source = "generated"
         server.live_interface_name = rendered.interface_name
         server.live_config_path = rendered.remote_path
@@ -109,6 +110,17 @@ def _stale_job_timeout(job: DeploymentJob) -> timedelta:
     if job.job_type == JobType.BACKUP:
         return timedelta(minutes=30)
     return timedelta(minutes=10)
+
+
+def _refresh_server_live_runtime_state(db: Session, server: Server) -> None:
+    inspection = asyncio.run(StandardConfigInspector().inspect(server))
+    server.config_source = "imported" if inspection.interface or inspection.listen_port or inspection.peer_count else "generated"
+    server.live_interface_name = inspection.interface or server.live_interface_name or "awg0"
+    server.live_config_path = inspection.config_path or server.live_config_path
+    server.live_address_cidr = inspection.address_cidr or server.live_address_cidr
+    server.live_listen_port = inspection.listen_port if inspection.listen_port is not None else server.live_listen_port
+    server.live_peer_count = inspection.peer_count
+    server.live_runtime_details_json = inspection.raw_json or server.live_runtime_details_json
 
 
 def _load_job_and_server(job_id: int) -> tuple[Session, DeploymentJob | None, Server | None]:
@@ -183,6 +195,12 @@ def bootstrap_server(job_id: int) -> None:
             server.awg_interfaces_json = parsed.interfaces_json
             server.ready_for_topology = parsed.detected
             server.last_error = None
+            if parsed.detected:
+                try:
+                    _refresh_server_live_runtime_state(db, server)
+                except Exception:
+                    # Bootstrap should still succeed if live config inspection is temporarily unavailable.
+                    pass
         else:
             job.status = JobStatus.FAILED
             job.result_message = result.stderr.strip() or result.stdout.strip() or "Bootstrap failed"

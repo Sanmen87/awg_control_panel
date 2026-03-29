@@ -10,4 +10,5 @@ node_modules/
 dist/
 coverage/
 backups/
-
+backend/celerybeat-schedule
+backend/celerybeat-schedule.*

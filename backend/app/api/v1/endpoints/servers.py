@@ -9,8 +9,8 @@ from app.db.session import get_db
 from app.models.client import Client
 from app.models.job import DeploymentJob, JobStatus, JobType
 from app.models.server import AWGStatus, AccessStatus, InstallMethod, Server, ServerStatus
-from app.models.topology import Topology
-from app.models.topology_node import TopologyNode
+from app.models.topology import Topology, TopologyType
+from app.models.topology_node import TopologyNode, TopologyNodeRole
 from app.models.user import User
 from app.schemas.job import DeploymentJobRead
 from app.schemas.server import ServerAwgProfileUpdate, ServerBootstrapRequest, ServerCreate, ServerRead, ServerUpdate
@@ -31,23 +31,31 @@ from app.services.topology_renderer import RenderedConfig
 router = APIRouter()
 
 
-def _is_server_ready_for_managed_clients(server: Server) -> bool:
+def _is_server_ready_for_managed_clients(
+    server: Server,
+    topology_by_id: dict[int, Topology] | None = None,
+    nodes_by_server_id: dict[int, list[TopologyNode]] | None = None,
+) -> bool:
     if not server.awg_detected:
+        return False
+    if not server.live_runtime_details_json:
         return False
     if not server.live_address_cidr or not server.live_listen_port:
         return False
-    try:
-        runtime_details = json.loads(server.live_runtime_details_json) if server.live_runtime_details_json else {}
-    except json.JSONDecodeError:
-        runtime_details = {}
-    if not isinstance(runtime_details, dict):
-        runtime_details = {}
-    config_preview = runtime_details.get("config_preview")
-    return isinstance(config_preview, str) and bool(config_preview.strip())
+    if topology_by_id is not None and nodes_by_server_id is not None:
+        for node in nodes_by_server_id.get(server.id, []):
+            topology = topology_by_id.get(node.topology_id)
+            if topology and topology.type == TopologyType.PROXY_EXIT and node.role != TopologyNodeRole.PROXY:
+                return False
+    return True
 
 
-def _hydrate_server_readiness(server: Server) -> None:
-    setattr(server, "ready_for_managed_clients", _is_server_ready_for_managed_clients(server))
+def _hydrate_server_readiness(
+    server: Server,
+    topology_by_id: dict[int, Topology] | None = None,
+    nodes_by_server_id: dict[int, list[TopologyNode]] | None = None,
+) -> None:
+    setattr(server, "ready_for_managed_clients", _is_server_ready_for_managed_clients(server, topology_by_id, nodes_by_server_id))
 
 
 @router.get("", response_model=list[ServerRead])
@@ -56,10 +64,12 @@ def list_servers(db: Session = Depends(get_db), _: User = Depends(get_current_us
     nodes = db.query(TopologyNode).all()
     topologies = {item.id: item for item in db.query(Topology).all()}
     topology_name_by_server: dict[int, str] = {}
+    nodes_by_server_id: dict[int, list[TopologyNode]] = {}
     geo = ServerGeoService()
     metadata_changed = False
     for node in nodes:
         topology = topologies.get(node.topology_id)
+        nodes_by_server_id.setdefault(node.server_id, []).append(node)
         if topology and node.server_id not in topology_name_by_server:
             topology_name_by_server[node.server_id] = topology.name
     for server in servers:
@@ -74,7 +84,7 @@ def list_servers(db: Session = Depends(get_db), _: User = Depends(get_current_us
                 db.add(server)
                 metadata_changed = True
         setattr(server, "topology_name", topology_name_by_server.get(server.id))
-        _hydrate_server_readiness(server)
+        _hydrate_server_readiness(server, topologies, nodes_by_server_id)
     if metadata_changed:
         db.commit()
         for server in servers:

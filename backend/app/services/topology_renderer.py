@@ -62,6 +62,18 @@ class TopologyRenderer:
         first_host = next(network.hosts())
         return f"{first_host}/{network.prefixlen}"
 
+    def _proxy_service_interface_name(self, priority: int) -> str:
+        return f"awg{priority}"
+
+    def _proxy_service_interface_address(self, priority: int) -> str:
+        return f"10.200.{priority}.1/32"
+
+    def _proxy_service_table_id(self, priority: int) -> str:
+        return str(51820 + priority)
+
+    def _proxy_service_listen_port(self, priority: int) -> int:
+        return 51820 + priority
+
     def _render_service_peer_block(
         self,
         *,
@@ -189,9 +201,14 @@ class TopologyRenderer:
             if len(exit_nodes) != 1:
                 raise TopologyRenderError("Proxy-exit topology must contain exactly one exit node")
 
-            exit_server = servers_by_id[exit_nodes[0].server_id]
-            proxy_address = self._proxy_interface_address(topology)
+            exit_node = exit_nodes[0]
+            exit_server = servers_by_id[exit_node.server_id]
             proxy_subnet = self._proxy_client_subnet(topology)
+            proxy_interface_address = self._proxy_interface_address(topology)
+            service_interface_name = self._proxy_service_interface_name(exit_node.priority)
+            service_interface_address = self._proxy_service_interface_address(exit_node.priority)
+            service_table_id = self._proxy_service_table_id(exit_node.priority)
+            service_listen_port = self._proxy_service_listen_port(exit_node.priority)
 
             proxy_runtime = {}
             if getattr(proxy_server, "live_runtime_details_json", None):
@@ -199,6 +216,13 @@ class TopologyRenderer:
                     proxy_runtime = json.loads(proxy_server.live_runtime_details_json)
                 except json.JSONDecodeError:
                     proxy_runtime = {}
+            proxy_config_preview = proxy_runtime.get("config_preview") if isinstance(proxy_runtime, dict) else None
+            proxy_has_live_config = (
+                isinstance(proxy_config_preview, str)
+                and proxy_config_preview.strip()
+                and bool(getattr(proxy_server, "live_config_path", None))
+            )
+
             exit_runtime = {}
             if getattr(exit_server, "live_runtime_details_json", None):
                 try:
@@ -208,28 +232,49 @@ class TopologyRenderer:
 
             obfuscation_fields = self.awg_profile.for_subject(topology)
 
-            if getattr(proxy_server, "config_source", "generated") == "imported" and isinstance(proxy_runtime.get("config_preview"), str):
-                proxy_private_key = None
-            elif key_provider:
-                proxy_private_key, *_rest = key_provider(proxy_server.id, exit_server.id, "awg0")
+            proxy_main_keypair = key_provider(proxy_server.id, proxy_server.id, "awg0") if key_provider else None
+            if proxy_main_keypair:
+                proxy_main_private_key = proxy_main_keypair[0]
             else:
-                proxy_private_key, _preview_public = self._generate_preview_keypair()
+                proxy_main_private_key, _proxy_main_public_key = self._generate_preview_keypair()
+
+            proxy_keypair = key_provider(proxy_server.id, exit_server.id, service_interface_name) if key_provider else None
+            if proxy_keypair:
+                proxy_private_key, proxy_public_key, exit_private_from_provider, exit_public_key = proxy_keypair
+            else:
+                proxy_private_key, proxy_public_key = self._generate_preview_keypair()
+                exit_private_from_provider, exit_public_key = self._generate_preview_keypair()
 
             exit_config_preview = exit_runtime.get("config_preview") if isinstance(exit_runtime, dict) else None
-            if not isinstance(exit_config_preview, str) or not exit_config_preview.strip():
-                raise TopologyRenderError("Exit server must have a live standard config for proxy-exit v1")
-            if not getattr(exit_server, "live_config_path", None):
-                raise TopologyRenderError("Exit server is missing live config path for proxy-exit v1")
+            exit_has_live_config = (
+                isinstance(exit_config_preview, str)
+                and exit_config_preview.strip()
+                and bool(getattr(exit_server, "live_config_path", None))
+            )
 
-            exit_public_key = None
+            exit_private_key = None
+            exit_interface_public_key = None
             if isinstance(exit_config_preview, str):
                 for line in exit_config_preview.splitlines():
                     stripped = line.strip()
                     if stripped.startswith("PrivateKey = "):
                         exit_private_key = stripped.split("=", 1)[1].strip()
                         break
-            if not exit_public_key and key_provider:
-                _proxy_private, _proxy_public, _exit_private, exit_public_key = key_provider(proxy_server.id, exit_server.id, "awg0")
+            if isinstance(exit_runtime, dict):
+                peers = exit_runtime.get("peers")
+                if isinstance(peers, list):
+                    for peer in peers:
+                        if not isinstance(peer, dict):
+                            continue
+                        public_key = peer.get("public_key")
+                        allowed_ips = peer.get("allowed_ips")
+                        if isinstance(public_key, str) and public_key.strip() and not allowed_ips:
+                            exit_interface_public_key = public_key.strip()
+                            break
+            if not exit_private_key:
+                exit_private_key = exit_private_from_provider
+            if exit_has_live_config:
+                exit_public_key = exit_interface_public_key or None
             if not exit_public_key:
                 if exit_private_key:
                     exit_private_raw = base64.b64decode(exit_private_key.encode("utf-8"))
@@ -242,27 +287,8 @@ class TopologyRenderer:
                 else:
                     _exit_private, exit_public_key = self._generate_preview_keypair()
 
-            proxy_public_key = None
-            if isinstance(proxy_runtime.get("config_preview"), str):
-                for line in proxy_runtime["config_preview"].splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("PrivateKey = "):
-                        proxy_private_key = stripped.split("=", 1)[1].strip()
-                        break
-            if not proxy_public_key:
-                if key_provider and getattr(proxy_server, "config_source", "generated") == "imported":
-                    proxy_private_key, proxy_public_key, *_rest = key_provider(proxy_server.id, exit_server.id, "awg0")
-                elif proxy_private_key:
-                    preview_private = base64.b64decode(proxy_private_key.encode("utf-8"))
-                    private = x25519.X25519PrivateKey.from_private_bytes(preview_private)
-                    public_raw = private.public_key().public_bytes(
-                        encoding=serialization.Encoding.Raw,
-                        format=serialization.PublicFormat.Raw,
-                    )
-                    proxy_public_key = base64.b64encode(public_raw).decode("utf-8")
-
             exit_endpoint = f"{exit_server.host}:{getattr(exit_server, 'live_listen_port', None) or 51820}"
-            proxy_endpoint = f"{proxy_server.host}:{getattr(proxy_server, 'live_listen_port', None) or 51820}"
+            proxy_endpoint = f"{proxy_server.host}:{service_listen_port}"
             service_peer_for_proxy = self._render_service_peer_block(
                 public_key=exit_public_key,
                 endpoint=exit_endpoint,
@@ -274,40 +300,80 @@ class TopologyRenderer:
                 allowed_ips=proxy_subnet,
             )
 
-            proxy_config_preview = proxy_runtime.get("config_preview") if isinstance(proxy_runtime, dict) else None
-            if isinstance(proxy_config_preview, str) and getattr(proxy_server, "config_source", "generated") == "imported":
-                proxy_content = self.adopter.render_with_service_peer(proxy_config_preview, service_peer_for_proxy).strip()
+            proxy_content = render_link_config(
+                topology_name=topology.name,
+                role="proxy-exit-service",
+                interface_name=service_interface_name,
+                local_address=service_interface_address,
+                private_key=proxy_private_key or "",
+                peer_public_key=exit_public_key,
+                endpoint=exit_endpoint,
+                allowed_ips="0.0.0.0/0, ::/0",
+                listen_port=service_listen_port,
+                extra_interface_fields=obfuscation_fields,
+            ).strip()
+            proxy_content = self._ensure_interface_setting(proxy_content, "Table", "off").strip()
+
+            exit_interface_name = getattr(exit_server, "live_interface_name", None) or "awg0"
+            exit_remote_path = getattr(exit_server, "live_config_path", None) or self._docker_remote_path(exit_server, exit_interface_name)
+            if exit_has_live_config:
+                exit_content = self.adopter.render_with_service_peer(exit_config_preview, service_peer_for_exit).strip() + "\n"
+                exit_metadata = {"proxy_exit_role": "exit", "proxy_client_subnet": proxy_subnet, "preserve_existing": "1"}
             else:
-                proxy_content = render_standard_server_config(
+                if not exit_private_key:
+                    raise TopologyRenderError("Exit server keypair generation failed for proxy-exit")
+                exit_content = render_standard_server_config(
                     topology_name=topology.name,
-                    interface_name="awg0",
-                    address=proxy_address,
-                    private_key=proxy_private_key or "",
+                    interface_name=exit_interface_name,
+                    address="10.100.0.1/24",
+                    private_key=exit_private_key,
                     extra_interface_fields=obfuscation_fields,
                 ).strip()
-                # The proxy must not let awg-quick install a host-wide default route.
-                proxy_content = self._ensure_interface_setting(proxy_content, "Table", "off").strip()
-                proxy_content = self.adopter.render_with_service_peer(proxy_content, service_peer_for_proxy).strip()
+                exit_content = self._ensure_interface_setting(exit_content, "Table", "off").strip()
+                exit_content = self.adopter.render_with_service_peer(exit_content, service_peer_for_exit).strip() + "\n"
+                exit_metadata = {"proxy_exit_role": "exit", "proxy_client_subnet": proxy_subnet}
 
-            exit_remote_path = getattr(exit_server, "live_config_path", None) or self._docker_remote_path(exit_server, getattr(exit_server, "live_interface_name", None) or "awg0")
-            exit_content = self.adopter.render_with_service_peer(exit_config_preview, service_peer_for_exit).strip() + "\n"
+            rendered = []
+            if not proxy_has_live_config:
+                proxy_main_content = render_standard_server_config(
+                    topology_name=topology.name,
+                    interface_name="awg0",
+                    address=proxy_interface_address,
+                    private_key=proxy_main_private_key,
+                    extra_interface_fields=obfuscation_fields,
+                ).strip()
+                proxy_main_content = self._ensure_interface_setting(proxy_main_content, "Table", "off").strip()
+                rendered.append(
+                    RenderedConfig(
+                        server_id=proxy_server.id,
+                        interface_name="awg0",
+                        remote_path=self._docker_remote_path(proxy_server, "awg0"),
+                        content=proxy_main_content + "\n",
+                    )
+                )
 
-            return [
+            rendered.extend([
                 RenderedConfig(
                     server_id=proxy_server.id,
-                    interface_name="awg0",
-                    remote_path=self._docker_remote_path(proxy_server, "awg0"),
+                    interface_name=service_interface_name,
+                    remote_path=self._docker_remote_path(proxy_server, service_interface_name),
                     content=proxy_content + "\n",
-                    metadata={"proxy_exit_role": "proxy", "proxy_client_subnet": proxy_subnet},
+                    metadata={
+                        "proxy_exit_role": "proxy",
+                        "proxy_client_subnet": proxy_subnet,
+                        "proxy_service_table_id": service_table_id,
+                        "preserve_server_runtime": "1",
+                    },
                 ),
                 RenderedConfig(
                     server_id=exit_server.id,
-                    interface_name=getattr(exit_server, "live_interface_name", None) or "awg0",
+                    interface_name=exit_interface_name,
                     remote_path=exit_remote_path,
                     content=exit_content,
-                    metadata={"proxy_exit_role": "exit", "proxy_client_subnet": proxy_subnet, "preserve_existing": "1"},
+                    metadata=exit_metadata,
                 ),
-            ]
+            ])
+            return rendered
 
         rendered: list[RenderedConfig] = []
         for node in exit_nodes:

@@ -220,3 +220,16 @@ class StandardConfigAdopter:
             blocks.append("\n".join(service_peer.raw_lines).strip())
 
         return "\n\n".join(blocks).strip() + "\n"
+
+    def remove_service_peer(self, config_text: str) -> str:
+        parsed = self.parse(config_text)
+        interface_block = "\n".join(parsed.interface_lines).strip()
+        blocks: list[str] = [interface_block] if interface_block else ["[Interface]"]
+
+        for peer in parsed.peers:
+            is_service_peer = any("service-exit-peer" in line for line in peer.raw_lines)
+            if is_service_peer:
+                continue
+            blocks.append("\n".join(peer.raw_lines).strip())
+
+        return "\n\n".join(blocks).strip() + "\n"

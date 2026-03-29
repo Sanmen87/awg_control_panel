@@ -46,9 +46,44 @@ class TopologyDeployer:
         match = re.search(rf"^{re.escape(key)}\s*=\s*(.+)$", content, re.MULTILINE)
         return match.group(1).strip() if match else None
 
+    def _docker_container_name(self, server: Server) -> str | None:
+        if server.live_runtime_details_json:
+            try:
+                runtime_details = json.loads(server.live_runtime_details_json)
+            except json.JSONDecodeError:
+                runtime_details = {}
+            docker_container = runtime_details.get("docker_container")
+            if isinstance(docker_container, str) and docker_container.strip():
+                return docker_container.strip()
+        if getattr(server.install_method, "value", None) == "docker":
+            return "amnezia-awg"
+        return None
+
+    def _representative_client_ip(self, subnet: str, interface_address: str | None) -> str:
+        network = ipaddress.ip_network(subnet, strict=False)
+        interface_ip = None
+        if interface_address:
+            try:
+                interface_ip = ipaddress.ip_interface(interface_address).ip
+            except ValueError:
+                interface_ip = None
+
+        for host in network.hosts():
+            if interface_ip is not None and host == interface_ip:
+                continue
+            return str(host)
+        raise RuntimeError(f"No representative client IP available in subnet {subnet}")
+
+    def _should_manage_proxy_exit_exit_nat(self, config: RenderedConfig) -> bool:
+        if not config.metadata or config.metadata.get("proxy_exit_role") != "exit":
+            return False
+        return config.metadata.get("preserve_existing") != "1"
+
     def _build_native_nat_commands(self, server: Server, config: RenderedConfig) -> list[str]:
         network_cidr = None
-        if config.metadata and config.metadata.get("proxy_client_subnet") and config.metadata.get("proxy_exit_role") == "exit":
+        if config.metadata and config.metadata.get("proxy_exit_role"):
+            if not self._should_manage_proxy_exit_exit_nat(config):
+                return []
             network_cidr = config.metadata.get("proxy_client_subnet")
         elif server.role == ServerRole.STANDARD_VPN:
             address = self._extract_config_value(config.content, "Address")
@@ -77,16 +112,38 @@ class TopologyDeployer:
         if not subnet:
             return []
         interface = shlex.quote(config.interface_name)
-        table_id = "51820"
+        table_id = shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")
         return [
-            f'while ip rule show | grep -Fq "from {subnet} lookup {table_id}"; do ip rule del from {shlex.quote(subnet)} table {table_id}; done',
+            f'while ip rule show | grep -Fq "from {subnet} "; do ip rule del from {shlex.quote(subnet)} || break; done',
+            f'ip route flush table {table_id} || true',
             f'ip rule add from {shlex.quote(subnet)} table {table_id}',
             f'ip route replace {shlex.quote(subnet)} dev {interface} table {table_id}',
-            f'ip route replace default dev {interface} table {table_id}',
+            f'ip route replace default dev {interface} scope link table {table_id}',
+        ]
+
+    def _build_proxy_exit_proxy_cleanup_commands(self, config: RenderedConfig) -> list[str]:
+        if not config.metadata or config.metadata.get("proxy_exit_role") != "proxy":
+            return []
+        subnet = config.metadata.get("proxy_client_subnet")
+        if not subnet:
+            return []
+        return [
+            (
+                "if command -v iptables >/dev/null 2>&1; then "
+                'for IFACE in $(ip -o link show 2>/dev/null | awk -F": " \'{print $2}\' | cut -d"@" -f1); do '
+                '[ -n "$IFACE" ] || continue; '
+                f'while iptables -t nat -C POSTROUTING -s {subnet} -o "$IFACE" -j MASQUERADE >/dev/null 2>&1; do '
+                f'iptables -t nat -D POSTROUTING -s {subnet} -o "$IFACE" -j MASQUERADE >/dev/null 2>&1 || break; '
+                "done; "
+                "done; "
+                "fi"
+            ),
         ]
 
     def _docker_client_network(self, server: Server, config: RenderedConfig) -> str | None:
-        if config.metadata and config.metadata.get("proxy_client_subnet") and config.metadata.get("proxy_exit_role") == "exit":
+        if config.metadata and config.metadata.get("proxy_exit_role"):
+            if not self._should_manage_proxy_exit_exit_nat(config):
+                return None
             return config.metadata.get("proxy_client_subnet")
         if server.role != ServerRole.STANDARD_VPN:
             return None
@@ -189,6 +246,7 @@ class TopologyDeployer:
             host_steps = [
                 "set -e",
                 *self._build_docker_host_firewall_commands(),
+                *self._build_proxy_exit_proxy_cleanup_commands(config),
                 *self._build_proxy_exit_proxy_routing_commands(config),
                 f"docker exec {container_name} sh -lc 'mkdir -p {remote_dir}'",
                 f"docker cp /tmp/{config.interface_name}.conf {container_name}:{container_path}",
@@ -255,6 +313,7 @@ class TopologyDeployer:
                     "sysctl -w net.ipv4.ip_forward=1",
                     f"awg-quick down {interface} || true",
                     f"awg-quick up {interface}",
+                    *self._build_proxy_exit_proxy_cleanup_commands(config),
                     *self._build_native_nat_commands(server, config),
                     *self._build_proxy_exit_proxy_routing_commands(config),
                 ]
@@ -326,6 +385,7 @@ class TopologyDeployer:
             host_steps = [
                 "set -e",
                 *self._build_docker_host_firewall_commands(),
+                *self._build_proxy_exit_proxy_cleanup_commands(config),
                 *self._build_proxy_exit_proxy_routing_commands(config),
                 f"docker exec {shlex.quote(docker_container)} sh -lc \"cp {shlex.quote(config.remote_path)} {shlex.quote(config.remote_path)}.bak.{backup_suffix} 2>/dev/null || true\"",
                 f"docker cp {shlex.quote(temp_remote)} {shlex.quote(docker_container)}:{shlex.quote(config.remote_path)}",
@@ -346,6 +406,7 @@ class TopologyDeployer:
                 f"chmod 600 {remote_path}",
                 f"(awg-quick down {interface} || wg-quick down {interface} || true)",
                 f"(awg-quick up {interface} || wg-quick up {interface})",
+                *self._build_proxy_exit_proxy_cleanup_commands(config),
                 *self._build_native_nat_commands(server, config),
                 *self._build_proxy_exit_proxy_routing_commands(config),
             ]
@@ -370,6 +431,99 @@ class TopologyDeployer:
             ) from exc
         if result.exit_status != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to apply adopted imported config")
+
+    async def verify_proxy_exit_path(self, proxy_server: Server, proxy_config: RenderedConfig, exit_server: Server, exit_config: RenderedConfig) -> None:
+        subnet = proxy_config.metadata.get("proxy_client_subnet") if proxy_config.metadata else None
+        if not subnet:
+            raise RuntimeError("Proxy-exit verification failed: proxy client subnet is missing")
+        table_id = proxy_config.metadata.get("proxy_service_table_id") if proxy_config.metadata else None
+        if not table_id:
+            raise RuntimeError("Proxy-exit verification failed: proxy service table id is missing")
+
+        proxy_interface = shlex.quote(proxy_config.interface_name)
+        proxy_peer_check = (
+            f'if command -v awg >/dev/null 2>&1; then awg show {proxy_interface} peers | grep -q . || {{ echo "Missing tunnel peer on proxy interface {proxy_config.interface_name}" >&2; exit 43; }}; '
+            f'elif command -v wg >/dev/null 2>&1; then wg show {proxy_interface} peers | grep -q . || {{ echo "Missing tunnel peer on proxy interface {proxy_config.interface_name}" >&2; exit 43; }}; '
+            'else echo "Neither awg nor wg is available on proxy" >&2; exit 44; fi'
+        )
+        proxy_container = self._docker_container_name(proxy_server)
+        if proxy_container:
+            proxy_peer_check = f"docker exec {shlex.quote(proxy_container)} sh -lc {shlex.quote(proxy_peer_check)}"
+
+        proxy_verify_command = "\n".join(
+            [
+                "set -eu",
+                f'ip rule show | grep -F "from {subnet} lookup {table_id}" >/dev/null',
+                f'ip route show table {shlex.quote(table_id)} | grep -F "default dev {proxy_config.interface_name}" >/dev/null',
+                f'ip route show table {shlex.quote(table_id)} | grep -F "{subnet} dev {proxy_config.interface_name}" >/dev/null',
+                proxy_peer_check,
+            ]
+        )
+        proxy_result = await self.ssh.run_command(
+            host=proxy_server.host,
+            username=proxy_server.ssh_user,
+            port=proxy_server.ssh_port,
+            password=self.credentials.get_ssh_password(proxy_server),
+            private_key=self.credentials.get_private_key(proxy_server),
+            command=wrap_with_optional_sudo(proxy_verify_command, self.credentials.get_sudo_password(proxy_server)),
+            timeout_seconds=30,
+        )
+        if proxy_result.exit_status != 0:
+            raise RuntimeError(
+                proxy_result.stderr.strip()
+                or proxy_result.stdout.strip()
+                or f"Proxy-exit verification failed on proxy {proxy_server.name} ({proxy_server.host})"
+            )
+
+        exit_interface = shlex.quote(exit_config.interface_name)
+        require_exit_nat = self._should_manage_proxy_exit_exit_nat(exit_config)
+        exit_container = self._docker_container_name(exit_server)
+        if exit_container:
+            exit_inner_lines = ["set -eu"]
+            if require_exit_nat:
+                exit_inner_lines.append(
+                    f'if ! iptables-save -t nat | grep -F -- "-A POSTROUTING -s {subnet} -o eth0 -j MASQUERADE" >/dev/null && ! iptables-save -t nat | grep -F -- "-A POSTROUTING -s {subnet} -o eth1 -j MASQUERADE" >/dev/null; then echo "Missing MASQUERADE for {subnet} via eth0/eth1 on docker exit" >&2; exit 42; fi'
+                )
+            exit_inner_lines.append(
+                f'if command -v awg >/dev/null 2>&1; then awg show {exit_interface} peers | grep -q . || {{ echo "Missing tunnel peer on exit interface {exit_config.interface_name}" >&2; exit 43; }}; elif command -v wg >/dev/null 2>&1; then wg show {exit_interface} peers | grep -q . || {{ echo "Missing tunnel peer on exit interface {exit_config.interface_name}" >&2; exit 43; }}; else echo "Neither awg nor wg is available on exit" >&2; exit 44; fi'
+            )
+            exit_inner_verify = "\n".join(exit_inner_lines)
+            exit_verify_command = "\n".join(
+                [
+                    "set -eu",
+                    f"docker exec {shlex.quote(exit_container)} sh -lc {shlex.quote(exit_inner_verify)}",
+                ]
+            )
+        else:
+            exit_lines = [
+                "set -eu",
+                'UPLINK_IFACE="$(ip route show default 2>/dev/null | awk \'/default/ {print $5; exit}\')"',
+                'if [ -z "${UPLINK_IFACE:-}" ]; then UPLINK_IFACE="$(ip -o route get 1.1.1.1 2>/dev/null | awk \'{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}\')"; fi',
+                'if [ -z "${UPLINK_IFACE:-}" ]; then echo "Missing exit uplink interface" >&2; exit 41; fi',
+            ]
+            if require_exit_nat:
+                exit_lines.append(
+                    f'if ! iptables-save -t nat | grep -F -- "-A POSTROUTING -s {subnet} -o " | grep -F -- " -j MASQUERADE" | grep -F -- " -o $UPLINK_IFACE " >/dev/null; then echo "Missing MASQUERADE for {subnet} via $UPLINK_IFACE on exit" >&2; exit 42; fi'
+                )
+            exit_lines.append(
+                f'if command -v awg >/dev/null 2>&1; then awg show {exit_interface} peers | grep -q . || {{ echo "Missing tunnel peer on exit interface {exit_config.interface_name}" >&2; exit 43; }}; elif command -v wg >/dev/null 2>&1; then wg show {exit_interface} peers | grep -q . || {{ echo "Missing tunnel peer on exit interface {exit_config.interface_name}" >&2; exit 43; }}; else echo "Neither awg nor wg is available on exit" >&2; exit 44; fi'
+            )
+            exit_verify_command = "\n".join(exit_lines)
+        exit_result = await self.ssh.run_command(
+            host=exit_server.host,
+            username=exit_server.ssh_user,
+            port=exit_server.ssh_port,
+            password=self.credentials.get_ssh_password(exit_server),
+            private_key=self.credentials.get_private_key(exit_server),
+            command=wrap_with_optional_sudo(exit_verify_command, self.credentials.get_sudo_password(exit_server)),
+            timeout_seconds=30,
+        )
+        if exit_result.exit_status != 0:
+            raise RuntimeError(
+                exit_result.stderr.strip()
+                or exit_result.stdout.strip()
+                or f"Proxy-exit verification failed on exit {exit_server.name} ({exit_server.host})"
+            )
 
     async def deploy(
         self,
@@ -455,14 +609,52 @@ class TopologyDeployer:
                     exit_server.id,
                     interface_name,
                 )
+                proxy_main_private, proxy_main_public, _unused_exit_private, _unused_exit_public = await key_provider(
+                    proxy_server.id,
+                    proxy_server.id,
+                    "awg0",
+                )
+                keypairs_by_scope = {
+                    (proxy_server.id, exit_server.id, interface_name): (proxy_private, proxy_public, exit_private, exit_public),
+                    (proxy_server.id, proxy_server.id, "awg0"): (proxy_main_private, proxy_main_public, "", ""),
+                }
                 rendered.extend(
                     renderer.render(
                         topology,
                         [proxy_node, node],
                         {proxy_server.id: proxy_server, exit_server.id: exit_server},
-                        key_provider=lambda *_args: (proxy_private, proxy_public, exit_private, exit_public),
+                        key_provider=lambda proxy_id, exit_id, iface_name, _keypairs=keypairs_by_scope: _keypairs[(proxy_id, exit_id, iface_name)],
                     )
                 )
+
+            proxy_server = servers_by_id[proxy_node.server_id]
+            proxy_runtime = {}
+            if getattr(proxy_server, "live_runtime_details_json", None):
+                try:
+                    proxy_runtime = json.loads(proxy_server.live_runtime_details_json)
+                except json.JSONDecodeError:
+                    proxy_runtime = {}
+            proxy_live_config = proxy_runtime.get("config_preview") if isinstance(proxy_runtime, dict) else None
+            proxy_live_interface = getattr(proxy_server, "live_interface_name", None) or "awg0"
+            proxy_live_config_path = getattr(proxy_server, "live_config_path", None)
+            if (
+                isinstance(proxy_live_config, str)
+                and "# service-exit-peer" in proxy_live_config
+                and proxy_live_config_path
+                and all(item.interface_name != proxy_live_interface for item in rendered)
+            ):
+                cleaned_proxy_content = self.adopter.remove_service_peer(proxy_live_config)
+                if cleaned_proxy_content != proxy_live_config:
+                    rendered.insert(
+                        0,
+                        RenderedConfig(
+                            server_id=proxy_server.id,
+                            interface_name=proxy_live_interface,
+                            remote_path=proxy_live_config_path,
+                            content=cleaned_proxy_content,
+                            metadata={"preserve_existing": "1"},
+                        ),
+                    )
         else:
             raise RuntimeError(f"Unsupported topology type for deploy: {topology.type.value}")
 
@@ -480,6 +672,24 @@ class TopologyDeployer:
                 await self.upload_and_apply_adopted_standard(server, config)
             else:
                 await self.upload_and_apply(server, config)
+
+        if topology.type == TopologyType.PROXY_EXIT:
+            proxy_config = next(
+                (item for item in rendered if item.metadata and item.metadata.get("proxy_exit_role") == "proxy"),
+                None,
+            )
+            exit_config = next(
+                (item for item in rendered if item.metadata and item.metadata.get("proxy_exit_role") == "exit"),
+                None,
+            )
+            if not proxy_config or not exit_config:
+                raise RuntimeError("Proxy-exit verification failed: rendered proxy/exit configs are incomplete")
+            await self.verify_proxy_exit_path(
+                servers_by_id[proxy_config.server_id],
+                proxy_config,
+                servers_by_id[exit_config.server_id],
+                exit_config,
+            )
 
         return rendered
 

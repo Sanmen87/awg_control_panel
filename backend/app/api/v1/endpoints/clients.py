@@ -11,6 +11,7 @@ from app.core.security import decrypt_value, encrypt_value
 from app.db.session import get_db
 from app.models.client import Client, ClientSource
 from app.models.server import Server
+from app.models.topology import Topology, TopologyType
 from app.models.topology_node import TopologyNode, TopologyNodeRole
 from app.models.user import User
 from app.schemas.client import (
@@ -190,6 +191,29 @@ def create_managed_client(
     server = db.query(Server).filter(Server.id == payload.server_id).first()
     if not server:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+    proxy_node = (
+        db.query(TopologyNode)
+        .filter(
+            TopologyNode.server_id == server.id,
+            TopologyNode.role == TopologyNodeRole.PROXY,
+        )
+        .first()
+    )
+    exit_node = (
+        db.query(TopologyNode)
+        .filter(
+            TopologyNode.server_id == server.id,
+            TopologyNode.role == TopologyNodeRole.EXIT,
+        )
+        .first()
+    )
+    if exit_node and not proxy_node:
+        topology = db.query(Topology).filter(Topology.id == exit_node.topology_id).first()
+        if topology and topology.type == TopologyType.PROXY_EXIT:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Managed clients for Proxy + 1 exit topologies must be created on the proxy server, not on the exit node.",
+            )
     server = _hydrate_server_live_state_from_preview(db, server)
     if server.awg_detected and (not server.live_runtime_details_json or not server.live_address_cidr):
         try:

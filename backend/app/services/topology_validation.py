@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import ipaddress
+import json
+import re
+
+from app.models.server import Server
 from app.models.topology import TopologyType
 from app.models.topology_node import TopologyNode, TopologyNodeRole
+from app.services.topology_renderer import TopologyRenderer
 
 
 class TopologyValidationResult:
@@ -16,7 +22,77 @@ class TopologyValidationResult:
 
 
 class TopologyValidationService:
-    def validate(self, topology_id: int, topology_type: TopologyType, nodes: list[TopologyNode]) -> TopologyValidationResult:
+    def _proxy_exit_overlap_errors(
+        self,
+        nodes: list[TopologyNode],
+        servers_by_id: dict[int, Server] | None,
+        topology_metadata_json: str | None,
+    ) -> list[str]:
+        if not servers_by_id:
+            return []
+
+        proxy_node = next((node for node in nodes if node.role == TopologyNodeRole.PROXY), None)
+        exit_node = next((node for node in nodes if node.role == TopologyNodeRole.EXIT), None)
+        if not proxy_node or not exit_node:
+            return []
+
+        proxy_server = servers_by_id.get(proxy_node.server_id)
+        exit_server = servers_by_id.get(exit_node.server_id)
+        if not proxy_server or not exit_server:
+            return []
+
+        topology_stub = type("TopologyStub", (), {"metadata_json": topology_metadata_json})()
+        try:
+            subnet = TopologyRenderer()._proxy_client_subnet(topology_stub)
+            proxy_network = ipaddress.ip_network(subnet, strict=False)
+        except ValueError:
+            return [f"Invalid proxy client subnet configured for topology: {subnet}"]
+
+        runtime_details_raw = getattr(exit_server, "live_runtime_details_json", None)
+        if not runtime_details_raw:
+            return []
+        try:
+            runtime_details = json.loads(runtime_details_raw)
+        except json.JSONDecodeError:
+            return []
+        config_preview = runtime_details.get("config_preview") if isinstance(runtime_details, dict) else None
+        if not isinstance(config_preview, str) or not config_preview.strip():
+            return []
+
+        errors: list[str] = []
+        for block in re.split(r"\n\s*\n", config_preview):
+            if "[Peer]" not in block:
+                continue
+            if "# service-exit-peer" in block:
+                continue
+            match = re.search(r"^AllowedIPs\s*=\s*(.+)$", block, re.MULTILINE)
+            if not match:
+                continue
+            raw_allowed_ips = match.group(1).strip()
+            for item in [part.strip() for part in raw_allowed_ips.split(",") if part.strip()]:
+                try:
+                    network = ipaddress.ip_network(item, strict=False)
+                except ValueError:
+                    continue
+                if network.version != proxy_network.version:
+                    continue
+                if network.overlaps(proxy_network):
+                    errors.append(
+                        f"Exit server {exit_server.name} ({exit_server.host}) already has peer route {item} "
+                        f"which overlaps proxy client subnet {proxy_network}."
+                    )
+                    break
+        return errors
+
+    def validate(
+        self,
+        topology_id: int,
+        topology_type: TopologyType,
+        nodes: list[TopologyNode],
+        *,
+        servers_by_id: dict[int, Server] | None = None,
+        topology_metadata_json: str | None = None,
+    ) -> TopologyValidationResult:
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -38,6 +114,8 @@ class TopologyValidationService:
                 errors.append("Proxy-exit topology must contain exactly one exit node")
             if standard_nodes:
                 errors.append("Proxy-exit topology cannot contain standard-vpn nodes")
+            if not errors:
+                errors.extend(self._proxy_exit_overlap_errors(nodes, servers_by_id, topology_metadata_json))
 
         if topology_type == TopologyType.PROXY_MULTI_EXIT:
             errors.append("Proxy-multi-exit topology is reserved for a future release and is not supported yet")

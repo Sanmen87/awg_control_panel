@@ -60,12 +60,39 @@ find_awg_container() {
   done | sort -t'|' -k1,1nr | head -n1 | cut -d'|' -f2-3
 }
 
+pick_primary_interface() {
+  interfaces="$1"
+  if [ -z "$interfaces" ]; then
+    return 0
+  fi
+  for preferred in awg0 wg0; do
+    if printf '%s\n' "$interfaces" | tr ' ' '\n' | grep -Fx "$preferred" >/dev/null 2>&1; then
+      printf '%s' "$preferred"
+      return 0
+    fi
+  done
+  printf '%s\n' "$interfaces" | tr ' ' '\n' | grep -E '^(awg|wg)[0-9]+$' | sort -V | head -n1
+}
+
+pick_primary_config_path() {
+  for base in /etc/amnezia/amneziawg /etc/amneziawg /etc/wireguard; do
+    for preferred in awg0 wg0; do
+      if [ -f "$base/$preferred.conf" ]; then
+        printf '%s' "$base/$preferred.conf"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
 if [ -n "$DOCKER_BIN" ]; then
   DOCKER_CONTAINER=$(find_awg_container)
 fi
 
 if [ -n "$AWG_BIN" ]; then
-  INTERFACE=$($AWG_BIN show interfaces 2>/dev/null | awk '{print $1}' || true)
+  INTERFACES=$($AWG_BIN show interfaces 2>/dev/null || true)
+  INTERFACE=$(pick_primary_interface "$INTERFACES")
 fi
 
 if [ -n "$INTERFACE" ] && [ -n "$AWG_BIN" ]; then
@@ -73,16 +100,25 @@ if [ -n "$INTERFACE" ] && [ -n "$AWG_BIN" ]; then
   PEER_COUNT=$($AWG_BIN show "$INTERFACE" peers 2>/dev/null | wc -w | tr -d ' ' || true)
 fi
 
+CONFIG_PATH=$(pick_primary_config_path || true)
+if [ -n "$CONFIG_PATH" ]; then
+  if [ -z "$INTERFACE" ]; then
+    INTERFACE=$(basename "$CONFIG_PATH" .conf)
+  fi
+fi
+
+if [ -z "$CONFIG_PATH" ]; then
+  for base in /etc/amnezia/amneziawg /etc/amneziawg /etc/wireguard; do
+    if [ -n "$INTERFACE" ] && [ -f "$base/$INTERFACE.conf" ]; then
+      CONFIG_PATH="$base/$INTERFACE.conf"
+      break
+    fi
+  done
+fi
+
 if [ -n "$INTERFACE" ] && [ -n "$IP_BIN" ]; then
   ADDRESS_CIDR=$($IP_BIN -o -f inet addr show "$INTERFACE" 2>/dev/null | awk '{print $4}' | head -n1 || true)
 fi
-
-for base in /etc/amnezia/amneziawg /etc/amneziawg /etc/wireguard; do
-  if [ -n "$INTERFACE" ] && [ -f "$base/$INTERFACE.conf" ]; then
-    CONFIG_PATH="$base/$INTERFACE.conf"
-    break
-  fi
-done
 
 if [ -n "$DOCKER_BIN" ] && [ -n "$DOCKER_CONTAINER" ]; then
     DOCKER_IMAGE=${DOCKER_CONTAINER#*|}
@@ -91,24 +127,33 @@ if [ -n "$DOCKER_BIN" ] && [ -n "$DOCKER_CONTAINER" ]; then
     RUNTIME="docker"
 
     if [ -z "$INTERFACE" ]; then
-      INTERFACE=$(docker exec "$DOCKER_CONTAINER" sh -lc '
+      INTERFACES=$(docker exec "$DOCKER_CONTAINER" sh -lc '
         if command -v awg >/dev/null 2>&1; then
-          awg show interfaces 2>/dev/null | awk "{print \$1}" | head -n1
+          awg show interfaces 2>/dev/null
         elif command -v wg >/dev/null 2>&1; then
-          wg show interfaces 2>/dev/null | awk "{print \$1}" | head -n1
+          wg show interfaces 2>/dev/null
         fi
       ' 2>/dev/null || true)
+      INTERFACE=$(pick_primary_interface "$INTERFACES")
     fi
 
     if [ -z "$INTERFACE" ] || [ -z "$CONFIG_PATH" ]; then
       CONFIG_DISCOVERY=$(docker exec "$DOCKER_CONTAINER" sh -lc '
+        for base in /etc/amnezia/amneziawg /etc/amneziawg /etc/wireguard /opt/amnezia/awg; do
+          for preferred in awg0 wg0; do
+            if [ -f "$base/$preferred.conf" ]; then
+              printf "%s\n" "$base/$preferred.conf"
+              exit 0
+            fi
+          done
+        done
         find /etc/amnezia /etc/amneziawg /etc/wireguard /opt/amnezia -maxdepth 3 -type f -name "*.conf" 2>/dev/null | head -n1
       ' 2>/dev/null || true)
       if [ -n "$CONFIG_DISCOVERY" ]; then
         if [ -z "$CONFIG_PATH" ]; then
           CONFIG_PATH="$CONFIG_DISCOVERY"
         fi
-        if [ -z "$INTERFACE" ]; then
+        if [ -z "$INTERFACE" ] || [ "$(basename "$CONFIG_DISCOVERY" .conf)" = "awg0" ] || [ "$(basename "$CONFIG_DISCOVERY" .conf)" = "wg0" ]; then
           INTERFACE=$(basename "$CONFIG_DISCOVERY" .conf)
         fi
       fi

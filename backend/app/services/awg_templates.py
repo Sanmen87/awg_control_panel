@@ -13,6 +13,7 @@ def render_link_config(
     peer_public_key: str,
     endpoint: str,
     allowed_ips: str,
+    listen_port: int = 51820,
     extra_interface_fields: dict[str, str] | None = None,
 ) -> str:
     lines = [
@@ -20,7 +21,7 @@ def render_link_config(
         f"# topology: {topology_name}",
         f"# role: {role}",
         f"Address = {local_address}",
-        "ListenPort = 51820",
+        f"ListenPort = {listen_port}",
         f"PrivateKey = {private_key}",
     ]
     for key in AWG_PROFILE_FIELD_ORDER:
