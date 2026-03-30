@@ -18,6 +18,7 @@ type Client = {
   source: string;
   server_id: number | null;
   topology_id: number | null;
+  exit_server_id: number | null;
   expires_at: string | null;
   quiet_hours_start: string | null;
   quiet_hours_end: string | null;
@@ -48,6 +49,22 @@ type Server = {
   awg_detected: boolean;
   ready_for_managed_clients: boolean;
   metadata_json: string | null;
+};
+
+type Topology = {
+  id: number;
+  name: string;
+  type: string;
+  default_exit_server_id: number | null;
+};
+
+type TopologyNode = {
+  id: number;
+  topology_id: number;
+  server_id: number;
+  role: string;
+  priority: number;
+  status: string;
 };
 
 type ImportResponse = {
@@ -188,9 +205,12 @@ export function ClientsPageClient() {
   const { locale } = useLocale();
   const [clients, setClients] = useState<Client[]>([]);
   const [servers, setServers] = useState<Server[]>([]);
+  const [topologies, setTopologies] = useState<Topology[]>([]);
+  const [nodes, setNodes] = useState<TopologyNode[]>([]);
   const [importServerId, setImportServerId] = useState("");
   const [newClientName, setNewClientName] = useState("");
   const [newClientServerId, setNewClientServerId] = useState("");
+  const [newClientExitServerId, setNewClientExitServerId] = useState("");
   const [search, setSearch] = useState("");
   const [serverFilter, setServerFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -206,6 +226,7 @@ export function ClientsPageClient() {
   const [materialsLoading, setMaterialsLoading] = useState(false);
   const [modalName, setModalName] = useState("");
   const [modalNote, setModalNote] = useState("");
+  const [modalExitServerId, setModalExitServerId] = useState("");
   const [expandedQr, setExpandedQr] = useState<{
     title: string;
     image: string;
@@ -227,6 +248,8 @@ export function ClientsPageClient() {
   const [deliveryChannelLoading, setDeliveryChannelLoading] = useState<"email" | "telegram" | null>(null);
   const [deliveryEmailStatus, setDeliveryEmailStatus] = useState<DeliveryChannelStatus>(null);
   const [deliveryTelegramStatus, setDeliveryTelegramStatus] = useState<DeliveryChannelStatus>(null);
+  const [importingPeers, setImportingPeers] = useState(false);
+  const [creatingClient, setCreatingClient] = useState(false);
 
   const copy = locale === "ru"
     ? {
@@ -235,8 +258,10 @@ export function ClientsPageClient() {
         importTitle: "Импорт с сервера",
         clientList: "Список клиентов",
         importButton: "Импортировать peer-ы",
+        importButtonLoading: "Импортирую peer-ы...",
         createTitle: "Новый клиент",
         createButton: "Создать клиента",
+        createButtonLoading: "Создаю клиента...",
         startButton: "Запустить",
         pauseButton: "Приостановить",
         deleteButton: "Удалить",
@@ -290,6 +315,7 @@ export function ClientsPageClient() {
         allStatuses: "Все статусы",
         fields: {
           server: "Сервер",
+          exit: "Выход",
           name: "Имя",
           source: "Источник",
           status: "Статус",
@@ -312,6 +338,9 @@ export function ClientsPageClient() {
         importHint: "Панель подтянет существующие peer-ы с сервера и сохранит их как клиентов.",
         createHint: "Создание управляемого клиента с сохранением конфигов и QR в базе.",
         createServerHint: "Для создания клиента показываются только серверы с готовым live config.",
+        exitHint: "Для proxy-клиента можно оставить общий exit topology или выбрать конкретный.",
+        topologyDefaultExit: "По умолчанию topology",
+        defaultBadge: "по умолчанию",
         materialsTitle: "Материалы клиента",
         qrHint: "Если QR несколько, сканируй их по порядку.",
         awgQrTitle: "QR для AmneziaWG",
@@ -333,8 +362,10 @@ export function ClientsPageClient() {
         importTitle: "Import from server",
         clientList: "Client list",
         importButton: "Import peers",
+        importButtonLoading: "Importing peers...",
         createTitle: "New client",
         createButton: "Create client",
+        createButtonLoading: "Creating client...",
         startButton: "Start",
         pauseButton: "Pause",
         deleteButton: "Delete",
@@ -388,6 +419,7 @@ export function ClientsPageClient() {
         allStatuses: "All statuses",
         fields: {
           server: "Server",
+          exit: "Exit",
           name: "Name",
           source: "Source",
           status: "Status",
@@ -410,6 +442,9 @@ export function ClientsPageClient() {
         importHint: "The panel will pull existing peers from the server and store them as clients.",
         createHint: "Create a managed client and store configs and QR in the database.",
         createServerHint: "Only servers with a ready live config are shown for managed client creation.",
+        exitHint: "For a proxy client you can keep the topology default exit or pick a specific one.",
+        topologyDefaultExit: "Topology default",
+        defaultBadge: "default",
         materialsTitle: "Client materials",
         qrHint: "If there are several QR codes, scan them in order.",
         awgQrTitle: "QR for AmneziaWG",
@@ -430,6 +465,23 @@ export function ClientsPageClient() {
     () => clients.find((client) => client.id === selectedClientId) ?? null,
     [clients, selectedClientId]
   );
+  const topologiesById = useMemo(
+    () => topologies.reduce<Record<number, Topology>>((acc, topology) => {
+      acc[topology.id] = topology;
+      return acc;
+    }, {}),
+    [topologies]
+  );
+  const nodesByTopology = useMemo(
+    () => nodes.reduce<Record<number, TopologyNode[]>>((acc, node) => {
+      if (!acc[node.topology_id]) {
+        acc[node.topology_id] = [];
+      }
+      acc[node.topology_id].push(node);
+      return acc;
+    }, {}),
+    [nodes]
+  );
   const settingsClient = useMemo(
     () => clients.find((client) => client.id === settingsClientId) ?? null,
     [clients, settingsClientId]
@@ -444,13 +496,17 @@ export function ClientsPageClient() {
       return;
     }
     try {
-      const [nextClients, nextServers, nextDeliverySettings] = await Promise.all([
+      const [nextClients, nextServers, nextTopologies, nextNodes, nextDeliverySettings] = await Promise.all([
         apiRequest<Client[]>(`/clients?archived=${archiveView === "archived" ? "true" : "false"}`, { token }),
         apiRequest<Server[]>("/servers", { token }),
+        apiRequest<Topology[]>("/topologies", { token }),
+        apiRequest<TopologyNode[]>("/topology-nodes", { token }),
         apiRequest<DeliverySettings>("/settings/delivery", { token }),
       ]);
       setClients(nextClients);
       setServers(nextServers);
+      setTopologies(nextTopologies);
+      setNodes(nextNodes);
       setDeliverySettings(nextDeliverySettings);
       if (selectedClientId) {
         const current = nextClients.find((client) => client.id === selectedClientId);
@@ -487,7 +543,69 @@ export function ClientsPageClient() {
     }
     setModalName(selectedClient.name);
     setModalNote(selectedClient.import_note ?? "");
+    setModalExitServerId(selectedClient.exit_server_id ? String(selectedClient.exit_server_id) : "");
   }, [selectedClient]);
+
+  function exitOptionsForServer(serverId: number | null) {
+    if (!serverId) {
+      return [];
+    }
+    const proxyNode = nodes.find((node) => node.server_id === serverId && node.role === "proxy");
+    if (!proxyNode) {
+      return [];
+    }
+    const topology = topologiesById[proxyNode.topology_id];
+    if (!topology || (topology.type !== "proxy-exit" && topology.type !== "proxy-multi-exit")) {
+      return [];
+    }
+    return [...(nodesByTopology[proxyNode.topology_id] ?? [])]
+      .filter((node) => node.role === "exit")
+      .sort((left, right) => left.priority - right.priority)
+      .map((node) => ({
+        server_id: node.server_id,
+        is_default: (nodesByTopology[proxyNode.topology_id] ?? [])
+          .filter((item) => item.role === "exit")
+          .sort((left, right) => left.priority - right.priority)[0]?.server_id === node.server_id
+      }));
+  }
+
+  const createExitOptions = useMemo(
+    () => exitOptionsForServer(newClientServerId ? Number(newClientServerId) : null),
+    [newClientServerId, nodes, nodesByTopology, topologiesById]
+  );
+
+  const modalExitOptions = useMemo(
+    () => exitOptionsForServer(selectedClient?.server_id ?? null),
+    [selectedClient, nodes, nodesByTopology, topologiesById]
+  );
+
+  const managedClientServerIds = useMemo(() => {
+    return new Set(
+      servers
+        .filter((server) => server.ready_for_managed_clients)
+        .map((server) => server.id)
+    );
+  }, [servers]);
+
+  useEffect(() => {
+    if (createExitOptions.length === 0) {
+      setNewClientExitServerId("");
+      return;
+    }
+    if (newClientExitServerId && !createExitOptions.some((option) => String(option.server_id) === newClientExitServerId)) {
+      setNewClientExitServerId("");
+    }
+  }, [createExitOptions, newClientExitServerId]);
+
+  useEffect(() => {
+    if (modalExitOptions.length === 0) {
+      setModalExitServerId("");
+      return;
+    }
+    if (modalExitServerId && !modalExitOptions.some((option) => String(option.server_id) === modalExitServerId)) {
+      setModalExitServerId("");
+    }
+  }, [modalExitOptions, modalExitServerId]);
 
   function serverName(serverId: number | null) {
     if (!serverId) {
@@ -546,7 +664,7 @@ export function ClientsPageClient() {
     if (!token || !importServerId) {
       return;
     }
-    setLoading(true);
+    setImportingPeers(true);
     try {
       const result = await apiRequest<ImportResponse>("/clients/import", {
         method: "POST",
@@ -561,7 +679,7 @@ export function ClientsPageClient() {
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Failed to import peers");
     } finally {
-      setLoading(false);
+      setImportingPeers(false);
     }
   }
 
@@ -570,25 +688,27 @@ export function ClientsPageClient() {
     if (!token || !newClientName || !newClientServerId) {
       return;
     }
-    setLoading(true);
+    setCreatingClient(true);
     try {
       await apiRequest<Client>("/clients/managed", {
         method: "POST",
         token,
         body: {
           name: newClientName,
-          server_id: Number(newClientServerId)
+          server_id: Number(newClientServerId),
+          exit_server_id: newClientExitServerId ? Number(newClientExitServerId) : null
         }
       });
       setInfo(`${copy.createButton}: ${newClientName}`);
       setNewClientName("");
       setNewClientServerId("");
+      setNewClientExitServerId("");
       setError(null);
       await loadData();
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Failed to create managed client");
     } finally {
-      setLoading(false);
+      setCreatingClient(false);
     }
   }
 
@@ -604,6 +724,7 @@ export function ClientsPageClient() {
         body: {
           name: modalName.trim() || client.name,
           status: client.status,
+          exit_server_id: modalExitServerId ? Number(modalExitServerId) : null,
           import_note: modalNote.trim() || null
         }
       });
@@ -668,6 +789,7 @@ export function ClientsPageClient() {
     setSelectedClientId(client.id);
     setModalName(client.name);
     setModalNote(client.import_note ?? "");
+    setModalExitServerId(client.exit_server_id ? String(client.exit_server_id) : "");
     setMaterials(null);
     setMaterialsLoading(true);
     try {
@@ -688,6 +810,7 @@ export function ClientsPageClient() {
     setMaterialsLoading(false);
     setModalName("");
     setModalNote("");
+    setModalExitServerId("");
     setExpandedQr(null);
     closeDeliveryModal();
   }
@@ -976,24 +1099,52 @@ export function ClientsPageClient() {
             <p>{copy.createHint}</p>
             <label className="field">
               <span>{copy.fields.name}</span>
-              <input value={newClientName} onChange={(event) => setNewClientName(event.target.value)} required />
+              <input
+                value={newClientName}
+                onChange={(event) => setNewClientName(event.target.value)}
+                disabled={creatingClient}
+                required
+              />
             </label>
             <label className="field">
               <span>{copy.fields.server}</span>
               <small>{copy.createServerHint}</small>
-              <select value={newClientServerId} onChange={(event) => setNewClientServerId(event.target.value)} required>
+              <select
+                value={newClientServerId}
+                onChange={(event) => setNewClientServerId(event.target.value)}
+                disabled={creatingClient}
+                required
+              >
                 <option value=""></option>
                 {servers
-                  .filter((server) => server.ready_for_managed_clients)
+                  .filter((server) => managedClientServerIds.has(server.id))
                   .map((server) => (
                     <option key={server.id} value={server.id}>
                       {server.name}
                     </option>
-                  ))}
+                ))}
               </select>
             </label>
-            <button type="submit" className="primary-button" disabled={loading}>
-              {copy.createButton}
+            {createExitOptions.length > 0 ? (
+              <label className="field">
+                <span>{copy.fields.exit}</span>
+                <small>{copy.exitHint}</small>
+                <select
+                  value={newClientExitServerId}
+                  onChange={(event) => setNewClientExitServerId(event.target.value)}
+                  disabled={creatingClient}
+                >
+                  <option value="">{copy.topologyDefaultExit}</option>
+                  {createExitOptions.map((option) => (
+                  <option key={option.server_id} value={option.server_id}>
+                      {serverName(option.server_id)}{option.is_default ? ` · ${copy.defaultBadge}` : ""}
+                  </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            <button type="submit" className="primary-button" disabled={creatingClient || !newClientName || !newClientServerId}>
+              {creatingClient ? copy.createButtonLoading : copy.createButton}
             </button>
           </form>
 
@@ -1002,7 +1153,12 @@ export function ClientsPageClient() {
             <p>{copy.importHint}</p>
             <label className="field">
               <span>{copy.fields.server}</span>
-              <select value={importServerId} onChange={(event) => setImportServerId(event.target.value)} required>
+              <select
+                value={importServerId}
+                onChange={(event) => setImportServerId(event.target.value)}
+                disabled={importingPeers}
+                required
+              >
                 <option value=""></option>
                 {servers.map((server) => (
                   <option key={server.id} value={server.id}>
@@ -1011,8 +1167,8 @@ export function ClientsPageClient() {
                 ))}
               </select>
             </label>
-            <button type="submit" className="primary-button" disabled={loading}>
-              {copy.importButton}
+            <button type="submit" className="primary-button" disabled={importingPeers || !importServerId}>
+              {importingPeers ? copy.importButtonLoading : copy.importButton}
             </button>
           </form>
         </>
@@ -1257,6 +1413,20 @@ export function ClientsPageClient() {
                       rows={5}
                     />
                   </label>
+                  {modalExitOptions.length > 0 ? (
+                    <label className="field">
+                      <span>{copy.fields.exit}</span>
+                      <small>{copy.exitHint}</small>
+                      <select value={modalExitServerId} onChange={(event) => setModalExitServerId(event.target.value)}>
+                        <option value="">{copy.topologyDefaultExit}</option>
+                        {modalExitOptions.map((option) => (
+                          <option key={option.server_id} value={option.server_id}>
+                            {serverName(option.server_id)}{option.is_default ? ` · ${copy.defaultBadge}` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
                   <button
                     type="button"
                     className="primary-button"

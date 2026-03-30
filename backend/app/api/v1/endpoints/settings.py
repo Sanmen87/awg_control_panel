@@ -2,10 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.config import settings as app_config
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.settings import DeliverySettingsRead, DeliverySettingsUpdate, DeliveryTestResult
-from app.services.app_settings import AppSettingsService, DeliverySettingsPayload
+from app.schemas.settings import BackupSettingsRead, BackupSettingsUpdate, DeliverySettingsRead, DeliverySettingsUpdate, DeliveryTestResult
+from app.services.app_settings import AppSettingsService, BackupSettingsPayload, DeliverySettingsPayload
 from app.services.delivery import DeliveryService
 
 router = APIRouter()
@@ -79,3 +80,36 @@ def test_telegram_delivery(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return DeliveryTestResult(channel="telegram", status="sent", detail=detail)
+
+
+@router.get("/backups", response_model=BackupSettingsRead)
+def get_backup_settings(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> BackupSettingsRead:
+    payload = AppSettingsService().get_backup_settings(db)
+    return BackupSettingsRead(
+        **payload.__dict__,
+        backup_storage_path=app_config.backup_storage_path,
+    )
+
+
+@router.patch("/backups", response_model=BackupSettingsRead)
+def update_backup_settings(
+    update: BackupSettingsUpdate,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> BackupSettingsRead:
+    service = AppSettingsService()
+    updated = service.update_backup_settings(
+        db,
+        BackupSettingsPayload(
+            auto_backup_enabled=update.auto_backup_enabled,
+            auto_backup_hour_utc=update.auto_backup_hour_utc,
+            backup_retention_days=update.backup_retention_days,
+        ),
+    )
+    return BackupSettingsRead(
+        **updated.__dict__,
+        backup_storage_path=app_config.backup_storage_path,
+    )

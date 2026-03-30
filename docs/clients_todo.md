@@ -197,6 +197,26 @@
   - server restore
   - fast redeploy / disaster recovery
 
+### Web Exposure And Hardening
+
+- Add a simple production web mode so the panel can be published quickly on the same server that hosts the proxy.
+- Provide a standard deployment path with:
+  - `nginx`
+  - TLS
+  - reverse proxy for `frontend` and `backend`
+- Support a practical "panel on proxy server" deployment profile without breaking AWG routing.
+- Add login protection in the app layer:
+  - rate limiting for auth endpoints
+  - temporary lockout / backoff after repeated failed logins
+  - audit trail for failed and successful admin logins
+- Add host-level brute-force protection:
+  - `fail2ban` integration or equivalent
+  - parsing of `nginx` / auth-related logs
+- Consider optional hardening modes:
+  - localhost-only admin mode
+  - public web mode
+  - restricted web mode with IP allowlist
+
 ### API And Integrations
 
 - Expand REST API for external JWT-authenticated integrations.

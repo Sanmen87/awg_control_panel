@@ -41,3 +41,16 @@ class DeliveryTestResult(BaseModel):
     channel: str
     status: str
     detail: str
+
+
+class BackupSettingsRead(BaseModel):
+    auto_backup_enabled: bool
+    auto_backup_hour_utc: int
+    backup_retention_days: int
+    backup_storage_path: str
+
+
+class BackupSettingsUpdate(BaseModel):
+    auto_backup_enabled: bool
+    auto_backup_hour_utc: int
+    backup_retention_days: int

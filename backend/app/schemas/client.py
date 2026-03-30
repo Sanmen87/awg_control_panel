@@ -13,6 +13,7 @@ class ClientBase(BaseModel):
     source: ClientSource = ClientSource.GENERATED
     server_id: int | None = None
     topology_id: int | None = None
+    exit_server_id: int | None = None
     delivery_email: str | None = None
     delivery_telegram_chat_id: str | None = None
     delivery_telegram_username: str | None = None
@@ -32,6 +33,7 @@ class ManagedClientCreate(BaseModel):
     name: str
     server_id: int
     topology_id: int | None = None
+    exit_server_id: int | None = None
     import_note: str | None = None
     expires_at: datetime | None = None
     quiet_hours_start: str | None = None
@@ -43,6 +45,7 @@ class ManagedClientCreate(BaseModel):
 class ClientUpdate(BaseModel):
     name: str
     status: str | None = None
+    exit_server_id: int | None = None
     import_note: str | None = None
     delivery_email: str | None = None
     delivery_telegram_chat_id: str | None = None

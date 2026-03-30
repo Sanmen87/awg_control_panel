@@ -181,11 +181,11 @@ export function TopologiesPageClient() {
           proxyServer: "Входной proxy",
           exitServer: "Exit сервер",
           priority: "Приоритет переключения",
-          retries: "Ошибок до переключения",
-          interval: "Интервал проверки, сек",
-          timeout: "Таймаут проверки, сек",
-          failback: "Успешных проверок до возврата",
-          autoFailback: "Автовозврат на основной exit"
+          retries: "Сколько ошибок подряд до переключения",
+          interval: "Как часто проверять exit, сек",
+          timeout: "Сколько ждать ответ, сек",
+          failback: "Сколько успешных проверок до возврата",
+          autoFailback: "Возвращаться на основной exit автоматически"
         },
         types: {
           standard: "Обычный VPN сервер",
@@ -195,7 +195,7 @@ export function TopologiesPageClient() {
         descriptions: {
           standard: "Один сервер без промежуточных exit-узлов.",
           proxyExit: "Один proxy и один exit. Подходит как первый failover-сценарий.",
-          proxyMultiExit: "Один proxy и несколько exit с приоритетами переключения."
+          proxyMultiExit: "Один proxy и несколько exit. Можно задать общий exit по умолчанию и переопределять выход для отдельных peer-ов."
         },
         profiles: {
           compatible: "compatible"
@@ -218,7 +218,9 @@ export function TopologiesPageClient() {
           awgProfile:
             "Профиль обфускации задаётся на уровне topology. После его смены нужно заново применить topology, чтобы сервер и generated-клиенты получили новые параметры.",
           failover:
-            "JSON скрыт. Панель сама сохраняет настройки failover во внутреннем формате.",
+            "Эти настройки использует локальный агент на proxy. Он сам проверяет доступность exit и переключает маршрут даже если панель недоступна. Для большинства сценариев подходят значения 3 / 10 / 3 / 2.",
+          defaultExit:
+            "Основным считается exit с самым высоким приоритетом переключения. Именно он будет использоваться для peer-ов без индивидуального переопределения.",
           validationOk: "Topology валидна и готова к preview/deploy.",
           previewEmpty: "Предпросмотр еще не запрашивался."
         },
@@ -268,11 +270,11 @@ export function TopologiesPageClient() {
           proxyServer: "Ingress proxy",
           exitServer: "Exit server",
           priority: "Failover priority",
-          retries: "Failures before switch",
-          interval: "Check interval, sec",
-          timeout: "Check timeout, sec",
+          retries: "Consecutive failures before switch",
+          interval: "How often to check the exit, sec",
+          timeout: "How long to wait for a reply, sec",
           failback: "Successful checks before failback",
-          autoFailback: "Auto failback to primary exit"
+          autoFailback: "Return to the primary exit automatically"
         },
         types: {
           standard: "Standard VPN server",
@@ -282,7 +284,7 @@ export function TopologiesPageClient() {
         descriptions: {
           standard: "Single AWG node without intermediate exit servers.",
           proxyExit: "One proxy and one exit. Good starting point for failover topology.",
-          proxyMultiExit: "One proxy with multiple exits and ordered failover."
+          proxyMultiExit: "One proxy with multiple exits. You can set a default exit and override the exit for specific peers."
         },
         profiles: {
           compatible: "compatible"
@@ -304,7 +306,10 @@ export function TopologiesPageClient() {
             "When you change the topology type, the panel keeps compatible nodes and adjusts roles to the new scenario where possible.",
           awgProfile:
             "Obfuscation profile is configured on topology level. Re-deploy the topology after changing it so the server and generated clients receive updated parameters.",
-          failover: "Raw JSON is hidden. The panel stores failover settings in the backend format automatically.",
+          failover:
+            "These settings are used by the local agent on the proxy. It checks exit health and switches routes even if the panel is unavailable. Safe defaults for most setups are 3 / 10 / 3 / 2.",
+          defaultExit:
+            "The highest-priority exit becomes the primary one automatically. Peers without an explicit override use that exit.",
           validationOk: "Topology is valid and ready for preview/deploy.",
           previewEmpty: "Preview has not been requested yet."
         },
@@ -466,7 +471,7 @@ export function TopologiesPageClient() {
     }
 
     setEditorName(selectedTopology.name);
-    setEditorType(selectedTopology.type === "proxy-multi-exit" ? "proxy-exit" : selectedTopology.type);
+    setEditorType(selectedTopology.type);
     setEditorAwgProfile(parseTopologyMetadata(selectedTopology.metadata_json).awg_profile_name ?? "compatible");
     setFailoverForm(parseFailoverConfig(selectedTopology.failover_config_json));
 
@@ -534,6 +539,7 @@ export function TopologiesPageClient() {
         token,
         body: {
           name: editorName,
+          default_exit_server_id: null,
           failover_config_json: stringifyFailoverConfig(failoverForm),
           metadata_json: JSON.stringify({ awg_profile_name: editorAwgProfile })
         }
@@ -617,7 +623,7 @@ export function TopologiesPageClient() {
         if (keeper) {
           await updateNode(keeper.id, "standard-vpn", 10);
         }
-      } else if (nextType === "proxy-exit") {
+      } else if (nextType === "proxy-exit" || nextType === "proxy-multi-exit") {
         const keeperProxy = proxyNode ?? standardNode ?? currentNodes[0];
         if (keeperProxy) {
           await updateNode(keeperProxy.id, "proxy", 10);
@@ -634,7 +640,13 @@ export function TopologiesPageClient() {
             await updateNode(node.id, "exit", 10);
             continue;
           }
-          await removeNode(node.id);
+          if (nextType === "proxy-exit") {
+            await removeNode(node.id);
+            continue;
+          }
+          if (node.role !== "exit") {
+            await removeNode(node.id);
+          }
         }
       }
 
@@ -705,6 +717,7 @@ export function TopologiesPageClient() {
         } else {
           await createNode(selectedTopology.id, targetServerId, "standard-vpn", 10);
         }
+
       } else {
         const targetProxyServerId = Number(proxyServerId);
         if (!targetProxyServerId) {
@@ -752,6 +765,7 @@ export function TopologiesPageClient() {
             await removeNode(node.id);
           }
         }
+
       }
 
       await loadData();
@@ -924,6 +938,7 @@ export function TopologiesPageClient() {
                 >
                   <option value="standard">{copy.types.standard}</option>
                   <option value="proxy-exit">{copy.types.proxyExit}</option>
+                  <option value="proxy-multi-exit">{copy.types.proxyMultiExit}</option>
                 </select>
               </label>
               <button type="submit" className="primary-button" disabled={saving}>
@@ -960,6 +975,7 @@ export function TopologiesPageClient() {
                     <select value={editorType} onChange={(event) => setEditorType(event.target.value)}>
                       <option value="standard">{copy.types.standard}</option>
                       <option value="proxy-exit">{copy.types.proxyExit}</option>
+                      <option value="proxy-multi-exit">{copy.types.proxyMultiExit}</option>
                     </select>
                   </label>
                   <label className="field">
@@ -970,11 +986,19 @@ export function TopologiesPageClient() {
                   </label>
                 </div>
                 <div className="topology-type-card">
-                  <strong>{copy.types[editorType === "proxy-exit" ? "proxyExit" : "standard"]}</strong>
+                  <strong>
+                    {editorType === "proxy-exit"
+                      ? copy.types.proxyExit
+                      : editorType === "proxy-multi-exit"
+                        ? copy.types.proxyMultiExit
+                        : copy.types.standard}
+                  </strong>
                   <p>
                     {editorType === "proxy-exit"
                       ? copy.descriptions.proxyExit
-                      : copy.descriptions.standard}
+                      : editorType === "proxy-multi-exit"
+                        ? copy.descriptions.proxyMultiExit
+                        : copy.descriptions.standard}
                   </p>
                 </div>
                 <div className="action-row">
@@ -1077,6 +1101,7 @@ export function TopologiesPageClient() {
                         </div>
                       ))}
                     </div>
+                    <div className="info-box">{copy.helper.defaultExit}</div>
                     <div className="action-row">
                       <button type="button" className="secondary-button" onClick={addExitRow}>
                         {copy.actions.addExit}

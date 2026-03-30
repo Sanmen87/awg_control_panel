@@ -25,11 +25,7 @@ router = APIRouter()
 
 
 def _ensure_supported_topology_type(topology_type: TopologyType) -> None:
-    if topology_type == TopologyType.PROXY_MULTI_EXIT:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="proxy-multi-exit is reserved for a future release and is not supported yet",
-        )
+    return None
 
 
 @router.get("", response_model=list[TopologyRead])
@@ -120,14 +116,22 @@ def validate_topology(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topology not found")
 
     nodes = db.query(TopologyNode).filter(TopologyNode.topology_id == topology_id).all()
+    clients = (
+        db.query(Client)
+        .filter(Client.topology_id == topology_id, Client.archived.is_(False))
+        .order_by(Client.created_at.asc())
+        .all()
+    )
     servers = db.query(Server).filter(Server.id.in_([node.server_id for node in nodes])).all() if nodes else []
     servers_by_id = {server.id: server for server in servers}
     result = TopologyValidationService().validate(
         topology.id,
         topology.type,
         nodes,
+        clients=clients,
         servers_by_id=servers_by_id,
         topology_metadata_json=topology.metadata_json,
+        default_exit_server_id=topology.default_exit_server_id,
     )
     return TopologyValidationResponse(
         topology_id=result.topology_id,
@@ -148,14 +152,22 @@ def get_deploy_preview(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topology not found")
 
     nodes = db.query(TopologyNode).filter(TopologyNode.topology_id == topology_id).all()
+    clients = (
+        db.query(Client)
+        .filter(Client.topology_id == topology_id, Client.archived.is_(False))
+        .order_by(Client.created_at.asc())
+        .all()
+    )
     servers = db.query(Server).filter(Server.id.in_([node.server_id for node in nodes])).all() if nodes else []
     servers_by_id = {server.id: server for server in servers}
     validation = TopologyValidationService().validate(
         topology.id,
         topology.type,
         nodes,
+        clients=clients,
         servers_by_id=servers_by_id,
         topology_metadata_json=topology.metadata_json,
+        default_exit_server_id=topology.default_exit_server_id,
     )
     if not validation.is_valid:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="; ".join(validation.errors))
@@ -178,23 +190,28 @@ def get_deploy_preview(
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Imported server config is missing live wg0.conf")
                 clients = (
                     db.query(Client)
-                    .filter(Client.server_id == standard_server.id, Client.topology_id == topology.id)
+                    .filter(Client.server_id == standard_server.id, Client.archived.is_(False))
                     .order_by(Client.created_at.asc())
                     .all()
                 )
-                if not clients:
-                    clients = (
-                        db.query(Client)
-                        .filter(Client.server_id == standard_server.id)
-                        .order_by(Client.created_at.asc())
-                        .all()
-                    )
+                known_server_public_keys = {
+                    public_key
+                    for (public_key,) in db.query(Client.public_key)
+                    .filter(Client.server_id == standard_server.id)
+                    .all()
+                    if public_key
+                }
                 rendered = [
                     RenderedConfig(
                         server_id=standard_server.id,
                         interface_name=standard_server.live_interface_name or "wg0",
                         remote_path=standard_server.live_config_path or "/opt/amnezia/awg/wg0.conf",
-                        content=StandardConfigAdopter().render(standard_server, clients, live_config),
+                        content=StandardConfigAdopter().render(
+                            standard_server,
+                            clients,
+                            live_config,
+                            known_public_keys=known_server_public_keys,
+                        ),
                     )
                 ]
             else:
@@ -228,14 +245,22 @@ def deploy_topology(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topology not found")
 
     nodes = db.query(TopologyNode).filter(TopologyNode.topology_id == topology_id).all()
+    clients = (
+        db.query(Client)
+        .filter(Client.topology_id == topology_id, Client.archived.is_(False))
+        .order_by(Client.created_at.asc())
+        .all()
+    )
     servers = db.query(Server).filter(Server.id.in_([node.server_id for node in nodes])).all() if nodes else []
     servers_by_id = {server.id: server for server in servers}
     validation = TopologyValidationService().validate(
         topology.id,
         topology.type,
         nodes,
+        clients=clients,
         servers_by_id=servers_by_id,
         topology_metadata_json=topology.metadata_json,
+        default_exit_server_id=topology.default_exit_server_id,
     )
     if not validation.is_valid:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="; ".join(validation.errors))

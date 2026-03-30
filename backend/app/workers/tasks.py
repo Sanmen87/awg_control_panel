@@ -2,20 +2,22 @@ import asyncio
 import json
 import re
 from pathlib import Path
-import tarfile
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.models.backup import BackupJob, BackupStatus
+from app.models.backup import BackupJob, BackupStatus, BackupType
 from app.models.client import Client
+from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.job import DeploymentJob, JobStatus, JobType
 from app.models.server import AWGStatus, AccessStatus, InstallMethod, Server, ServerStatus
 from app.models.topology import Topology, TopologyStatus, TopologyType
-from app.models.topology_node import TopologyNode
+from app.models.topology_node import TopologyNode, TopologyNodeRole
 from app.services.awg_detection import DETECT_AWG_COMMAND, parse_detection_output
+from app.services.app_settings import AppSettingsService
 from app.services.awg_profile import AWGProfileService
+from app.services.full_bundle_backup import FullBundleBackupService
 from app.services.bootstrap_commands import (
     BOOTSTRAP_SERVER_DOCKER_COMMAND,
     BOOTSTRAP_SERVER_GO_COMMAND,
@@ -23,7 +25,12 @@ from app.services.bootstrap_commands import (
     wrap_with_optional_sudo,
 )
 from app.services.client_sync import ClientSyncService
+from app.services.panel_backup import PanelBackupService
+from app.services.panel_restore import PanelRestoreService
+from app.services.proxy_failover_agent import ProxyFailoverAgentService
+from app.services.server_backup import ServerBackupService
 from app.services.server_credentials import ServerCredentialsService
+from app.services.server_restore import ServerRestoreService
 from app.services.clients_table import ClientsTableService
 from app.services.server_metrics import ServerMetricsService
 from app.services.ssh import SSHService
@@ -40,7 +47,7 @@ def _extract_rendered_config_value(content: str, key: str) -> str | None:
 
 
 def _persist_generated_standard_server_state(db: Session, topology: Topology | None, rendered_files: list) -> None:
-    if not topology or topology.type not in {TopologyType.STANDARD, TopologyType.PROXY_EXIT}:
+    if not topology or topology.type not in {TopologyType.STANDARD, TopologyType.PROXY_EXIT, TopologyType.PROXY_MULTI_EXIT}:
         return
     profile_service = AWGProfileService()
     for rendered in rendered_files:
@@ -48,6 +55,7 @@ def _persist_generated_standard_server_state(db: Session, topology: Topology | N
         if not server:
             continue
         if rendered.metadata and rendered.metadata.get("preserve_server_runtime") == "1":
+            # Service interfaces like awg10 must not replace the server's main awg0 live-state in the DB.
             continue
         if topology.type == TopologyType.STANDARD and server.config_source == "imported":
             continue
@@ -113,6 +121,7 @@ def _stale_job_timeout(job: DeploymentJob) -> timedelta:
 
 
 def _refresh_server_live_runtime_state(db: Session, server: Server) -> None:
+    # Bootstrap and re-check should converge to the same live runtime snapshot used by clients/topologies.
     inspection = asyncio.run(StandardConfigInspector().inspect(server))
     server.config_source = "imported" if inspection.interface or inspection.listen_port or inspection.peer_count else "generated"
     server.live_interface_name = inspection.interface or server.live_interface_name or "awg0"
@@ -320,6 +329,12 @@ def deploy_topology(job_id: int) -> None:
         job.result_message = "Applied configs:\n" + "\n".join(result_lines)
         if topology:
             topology.status = TopologyStatus.APPLIED
+            if topology.type in {TopologyType.PROXY_EXIT, TopologyType.PROXY_MULTI_EXIT}:
+                primary_exit = next(
+                    (node for node in sorted(nodes, key=lambda item: item.priority) if node.role == TopologyNodeRole.EXIT),
+                    None,
+                )
+                topology.active_exit_server_id = primary_exit.server_id if primary_exit else topology.active_exit_server_id
             db.add(topology)
         db.add(job)
         db.commit()
@@ -404,7 +419,7 @@ def detect_awg(job_id: int) -> None:
 
 @celery_app.task(name="app.workers.tasks.run_backup")
 def run_backup(job_id: int) -> None:
-    # Current backup task creates an application archive placeholder; DB dump/export comes next.
+    # Backup worker currently supports panel DB dumps and restore-ready server archives.
     db: Session = SessionLocal()
     backup_job_id: int | None = None
     try:
@@ -425,25 +440,42 @@ def run_backup(job_id: int) -> None:
             db.add(backup_job)
             db.commit()
 
-        backup_dir = Path("/app/backups")
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        archive_path = backup_dir / f"backup-job-{backup_job_id or job_id}-{timestamp}.tar.gz"
+        backup_dir = Path(settings.backup_storage_path)
+        if not backup_job:
+            raise RuntimeError("Backup job payload is missing")
 
-        with tarfile.open(archive_path, "w:gz") as archive:
-            for candidate in [Path("/app/alembic.ini"), Path("/app/app")]:
-                if candidate.exists():
-                    archive.add(candidate, arcname=candidate.name)
+        if backup_job.backup_type.value == "server":
+            if not backup_job.server_id:
+                raise RuntimeError("Server backup requires server_id")
+
+            server = db.query(Server).filter(Server.id == backup_job.server_id).first()
+            if not server:
+                raise RuntimeError("Server for backup was not found")
+
+            bundle = asyncio.run(ServerBackupService().create_backup(server, backup_job.id, backup_dir))
+            backup_job.result_message = "Server backup archive created"
+        elif backup_job.backup_type.value == "database":
+            bundle = PanelBackupService().create_backup(backup_job.id, backup_dir)
+            backup_job.result_message = "Panel backup archive created"
+        elif backup_job.backup_type.value == "full":
+            servers = (
+                db.query(Server)
+                .filter(Server.live_runtime_details_json.is_not(None))
+                .order_by(Server.created_at.asc())
+                .all()
+            )
+            bundle = asyncio.run(FullBundleBackupService().create_backup(backup_job.id, backup_dir, servers))
+            backup_job.result_message = "Full bundle backup archive created"
+        else:
+            raise RuntimeError(f"Backup type {backup_job.backup_type.value} is not implemented yet")
 
         job.status = JobStatus.SUCCEEDED
-        job.result_message = f"Backup completed: {archive_path}"
+        job.result_message = bundle.result_message
         db.add(job)
 
-        if backup_job:
-            backup_job.status = BackupStatus.SUCCEEDED
-            backup_job.storage_path = str(archive_path)
-            backup_job.result_message = "Backup archive created"
-            db.add(backup_job)
+        backup_job.status = BackupStatus.SUCCEEDED
+        backup_job.storage_path = str(bundle.archive_path)
+        db.add(backup_job)
 
         db.commit()
     except Exception as exc:  # noqa: BLE001
@@ -461,6 +493,107 @@ def run_backup(job_id: int) -> None:
             db.commit()
     finally:
         db.close()
+
+
+@celery_app.task(name="app.workers.tasks.restore_server_backup")
+def restore_server_backup(job_id: int) -> None:
+    db: Session = SessionLocal()
+    backup_job_id: int | None = None
+    bundle_server_id: int | None = None
+    try:
+        job = db.query(DeploymentJob).filter(DeploymentJob.id == job_id).first()
+        if not job:
+            return
+        if job.result_message and job.result_message.startswith("RestoreBackupJob:"):
+            parts = job.result_message.split(":")
+            if len(parts) >= 2:
+                backup_job_id = int(parts[1])
+            if len(parts) >= 3:
+                bundle_server_id = int(parts[2])
+        backup_job = db.query(BackupJob).filter(BackupJob.id == backup_job_id).first() if backup_job_id else None
+
+        job.status = JobStatus.RUNNING
+        job.result_message = "Restore started"
+        db.add(job)
+        db.commit()
+
+        if not backup_job or backup_job.backup_type.value != "server" or not backup_job.storage_path:
+            raise RuntimeError("Backup archive is not available for restore")
+        if not job.server_id:
+            raise RuntimeError("Restore job requires target server_id")
+
+        server = db.query(Server).filter(Server.id == job.server_id).first()
+        if not server:
+            raise RuntimeError("Target server not found")
+
+        bundle = asyncio.run(ServerRestoreService().restore_backup(server, Path(backup_job.storage_path), bundle_server_id=bundle_server_id))
+        try:
+            _refresh_server_live_runtime_state(db, server)
+        except Exception:
+            pass
+
+        job.status = JobStatus.SUCCEEDED
+        job.result_message = bundle.result_message
+        db.add(job)
+        db.add(server)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        job = db.query(DeploymentJob).filter(DeploymentJob.id == job_id).first()
+        if job:
+            job.status = JobStatus.FAILED
+            job.result_message = str(exc)
+            db.add(job)
+            db.commit()
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.restore_panel_backup")
+def restore_panel_backup(job_id: int) -> None:
+    db: Session = SessionLocal()
+    backup_job_id: int | None = None
+    try:
+        job = db.query(DeploymentJob).filter(DeploymentJob.id == job_id).first()
+        if not job:
+            return
+        if job.result_message and job.result_message.startswith("RestoreBackupJob:"):
+            backup_job_id = int(job.result_message.split(":", maxsplit=1)[1])
+        backup_job = db.query(BackupJob).filter(BackupJob.id == backup_job_id).first() if backup_job_id else None
+
+        job.status = JobStatus.RUNNING
+        job.result_message = "Panel restore started"
+        db.add(job)
+        db.commit()
+
+        if not backup_job or backup_job.backup_type.value != "database" or not backup_job.storage_path:
+            raise RuntimeError("Panel backup archive is not available for restore")
+
+        # Close ORM connections before restoring the same PostgreSQL database.
+        db.close()
+        PanelRestoreService().restore_backup(Path(backup_job.storage_path))
+        return
+    except Exception as exc:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            reopened: Session = SessionLocal()
+            job = reopened.query(DeploymentJob).filter(DeploymentJob.id == job_id).first()
+            if job:
+                job.status = JobStatus.FAILED
+                job.result_message = str(exc)
+                reopened.add(job)
+                reopened.commit()
+            reopened.close()
+        except Exception:
+            pass
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 @celery_app.task(name="app.workers.tasks.sync_client_runtime_stats")
@@ -504,12 +637,15 @@ def sync_client_runtime_stats() -> None:
 def sync_server_runtime_metrics() -> None:
     db: Session = SessionLocal()
     service = ServerMetricsService()
+    failover_agent = ProxyFailoverAgentService()
     try:
         servers = db.query(Server).filter(Server.access_status == AccessStatus.OK).all()
         for server in servers:
             try:
                 updated = asyncio.run(service.sync_server(db, server))
-                if updated:
+                status_payload = asyncio.run(failover_agent.fetch_status(server))
+                status_updated = failover_agent.sync_status_to_db(db, server, status_payload)
+                if updated or status_updated:
                     db.commit()
                 else:
                     db.rollback()
@@ -550,5 +686,87 @@ def reconcile_stale_jobs() -> None:
                     topology.status = TopologyStatus.ERROR
                     db.add(topology)
         db.commit()
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.run_scheduled_backups")
+def run_scheduled_backups() -> None:
+    db: Session = SessionLocal()
+    try:
+        service = AppSettingsService()
+        backup_settings = service.get_backup_settings(db)
+        now = datetime.now(UTC)
+        if not backup_settings.auto_backup_enabled or now.hour != backup_settings.auto_backup_hour_utc:
+            return
+
+        today_key = now.date().isoformat()
+        last_auto_backup_date = service.get_raw_backup_marker(db, "last_auto_backup_date")
+        if last_auto_backup_date == today_key:
+            return
+
+        backup_job = BackupJob(
+            backup_type=BackupType.DATABASE,
+            status=BackupStatus.PENDING,
+        )
+        db.add(backup_job)
+        db.commit()
+        db.refresh(backup_job)
+
+        deployment_job = DeploymentJob(
+            job_type=JobType.BACKUP,
+            status=JobStatus.PENDING,
+            result_message=f"BackupJob:{backup_job.id}",
+        )
+        db.add(deployment_job)
+        db.commit()
+        db.refresh(deployment_job)
+        deployment_job.task_id = JobService().dispatch_job(deployment_job)
+        db.add(deployment_job)
+        db.commit()
+
+        service.set_raw_backup_marker(db, "last_auto_backup_date", today_key)
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.cleanup_old_backups")
+def cleanup_old_backups() -> None:
+    db: Session = SessionLocal()
+    try:
+        service = AppSettingsService()
+        backup_settings = service.get_backup_settings(db)
+        now = datetime.now(UTC)
+        today_key = now.date().isoformat()
+        last_cleanup_date = service.get_raw_backup_marker(db, "last_backup_cleanup_date")
+        if last_cleanup_date == today_key:
+            return
+
+        cutoff = now - timedelta(days=backup_settings.backup_retention_days)
+        old_backups = (
+            db.query(BackupJob)
+            .filter(
+                BackupJob.storage_path.is_not(None),
+                BackupJob.created_at < cutoff,
+            )
+            .all()
+        )
+        for backup_job in old_backups:
+            archive_path = Path(backup_job.storage_path or "")
+            if archive_path.exists():
+                try:
+                    archive_path.unlink()
+                except Exception:
+                    continue
+            backup_job.storage_path = None
+            existing_message = (backup_job.result_message or "").strip()
+            backup_job.result_message = (existing_message + " | " if existing_message else "") + "Archive expired and removed by retention policy"
+            db.add(backup_job)
+        db.commit()
+        service.set_raw_backup_marker(db, "last_backup_cleanup_date", today_key)
+    except Exception:
+        db.rollback()
     finally:
         db.close()

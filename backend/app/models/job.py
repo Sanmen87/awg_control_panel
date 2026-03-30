@@ -13,6 +13,8 @@ class JobType(str, enum.Enum):
     CHECK_SERVER = "check-server"
     DETECT_AWG = "detect-awg"
     BACKUP = "backup"
+    RESTORE_SERVER = "restore-server"
+    RESTORE_PANEL = "restore-panel"
 
 
 class JobStatus(str, enum.Enum):

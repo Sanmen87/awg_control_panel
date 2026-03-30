@@ -114,10 +114,21 @@ class StandardConfigAdopter:
         flush_peer()
         return ParsedConfig(interface_lines=interface_lines, interface_fields=interface_fields, peers=peers)
 
-    def render(self, server: Server, clients: list[Client], config_text: str) -> str:
+    def render(
+        self,
+        server: Server,
+        clients: list[Client],
+        config_text: str,
+        *,
+        known_public_keys: set[str] | None = None,
+        removed_public_keys: set[str] | None = None,
+    ) -> str:
         parsed = self.parse(config_text)
         existing_by_public_key = {peer.public_key: peer for peer in parsed.peers if peer.public_key}
         interface_private_key = parsed.interface_fields.get("PrivateKey", "").strip()
+        preserve_unknown_peers = getattr(server, "config_source", "generated") == "imported"
+        known_public_keys = known_public_keys or set()
+        removed_public_keys = removed_public_keys or set()
         clients_by_public_key = {
             client.public_key: client
             for client in clients
@@ -179,12 +190,16 @@ class StandardConfigAdopter:
 
         for peer in parsed.peers:
             is_service_peer = any("service-exit-peer" in line for line in peer.raw_lines)
-            if has_panel_clients and not is_service_peer:
-                continue
             if not peer.public_key or peer.public_key in matched_public_keys:
                 continue
             if is_service_peer:
                 blocks.append("\n".join(peer.raw_lines).strip())
+                continue
+            if peer.public_key in removed_public_keys:
+                continue
+            if has_panel_clients and not preserve_unknown_peers:
+                continue
+            if has_panel_clients and preserve_unknown_peers and peer.public_key in known_public_keys:
                 continue
             peer_lines = ["[Peer]"]
             for key in peer.field_order:

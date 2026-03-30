@@ -12,6 +12,7 @@ from app.models.server import Server, ServerRole
 from app.models.topology import Topology, TopologyType
 from app.models.topology_node import TopologyNode, TopologyNodeRole
 from app.services.bootstrap_commands import wrap_with_optional_sudo
+from app.services.proxy_failover_agent import ProxyFailoverAgentService
 from app.services.server_credentials import ServerCredentialsService
 from app.services.ssh import SSHService
 from app.services.standard_config_adopter import StandardConfigAdopter
@@ -41,6 +42,7 @@ class TopologyDeployer:
         self.ssh = SSHService()
         self.credentials = ServerCredentialsService()
         self.adopter = StandardConfigAdopter()
+        self.failover_agent = ProxyFailoverAgentService()
 
     def _extract_config_value(self, content: str, key: str) -> str | None:
         match = re.search(rf"^{re.escape(key)}\s*=\s*(.+)$", content, re.MULTILINE)
@@ -73,6 +75,58 @@ class TopologyDeployer:
                 continue
             return str(host)
         raise RuntimeError(f"No representative client IP available in subnet {subnet}")
+
+    def _client_source_cidr(self, assigned_ip: str | None) -> str | None:
+        if not assigned_ip:
+            return None
+        try:
+            return str(ipaddress.ip_network(assigned_ip, strict=False))
+        except ValueError:
+            return None
+
+    def _resolve_proxy_exit_policy(
+        self,
+        topology: Topology,
+        proxy_server: Server,
+        exit_nodes: list[TopologyNode],
+        clients: list[Client] | None,
+    ) -> dict[int, dict[str, object]]:
+        sorted_exit_nodes = sorted(exit_nodes, key=lambda item: item.priority)
+        exit_server_ids = {node.server_id for node in exit_nodes}
+        if topology.type == TopologyType.PROXY_MULTI_EXIT:
+            default_exit_server_id = sorted_exit_nodes[0].server_id if sorted_exit_nodes else None
+            if not default_exit_server_id:
+                raise RuntimeError("Proxy-multi-exit topology must contain at least one exit node before deploy")
+            if topology.default_exit_server_id and topology.default_exit_server_id not in exit_server_ids:
+                raise RuntimeError("Default exit server must be one of the topology exit nodes")
+        else:
+            default_exit_server_id = sorted_exit_nodes[0].server_id
+
+        policy: dict[int, dict[str, object]] = {
+            node.server_id: {"is_default": node.server_id == default_exit_server_id, "sources": []}
+            for node in exit_nodes
+        }
+        relevant_clients = [
+            client
+            for client in (clients or [])
+            if not client.archived and client.server_id == proxy_server.id and client.assigned_ip
+        ]
+        for client in relevant_clients:
+            source_cidr = self._client_source_cidr(client.assigned_ip)
+            if not source_cidr:
+                continue
+            effective_exit_server_id = client.exit_server_id or default_exit_server_id
+            if effective_exit_server_id not in exit_server_ids:
+                raise RuntimeError(
+                    f"Client {client.name} points to exit server #{effective_exit_server_id}, but that server is not attached as an exit in this topology."
+                )
+            if topology.type == TopologyType.PROXY_MULTI_EXIT and effective_exit_server_id == default_exit_server_id:
+                continue
+            policy[effective_exit_server_id]["sources"].append(source_cidr)
+
+        for payload in policy.values():
+            payload["sources"] = sorted(set(payload["sources"]))  # type: ignore[index]
+        return policy
 
     def _should_manage_proxy_exit_exit_nat(self, config: RenderedConfig) -> bool:
         if not config.metadata or config.metadata.get("proxy_exit_role") != "exit":
@@ -113,13 +167,28 @@ class TopologyDeployer:
             return []
         interface = shlex.quote(config.interface_name)
         table_id = shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")
-        return [
-            f'while ip rule show | grep -Fq "from {subnet} "; do ip rule del from {shlex.quote(subnet)} || break; done',
-            f'ip route flush table {table_id} || true',
-            f'ip rule add from {shlex.quote(subnet)} table {table_id}',
-            f'ip route replace {shlex.quote(subnet)} dev {interface} table {table_id}',
-            f'ip route replace default dev {interface} scope link table {table_id}',
-        ]
+        default_subnet_rule = config.metadata.get("proxy_policy_default_subnet") == "1"
+        source_rules_raw = config.metadata.get("proxy_policy_sources_json") or "[]"
+        try:
+            source_rules = json.loads(source_rules_raw)
+        except json.JSONDecodeError:
+            source_rules = []
+        commands = [f'ip route flush table {table_id} || true']
+        if default_subnet_rule:
+            commands.append(f'ip rule add priority 200 from {shlex.quote(subnet)} table {table_id}')
+        for index, source in enumerate(source_rules):
+            if not isinstance(source, str) or not source.strip():
+                continue
+            commands.append(
+                f'ip rule add priority {100 + index} from {shlex.quote(source.strip())} table {table_id}'
+            )
+        commands.extend(
+            [
+                f'ip route replace {shlex.quote(subnet)} dev {interface} table {table_id}',
+                f'ip route replace default dev {interface} scope link table {table_id}',
+            ]
+        )
+        return commands
 
     def _build_proxy_exit_proxy_cleanup_commands(self, config: RenderedConfig) -> list[str]:
         if not config.metadata or config.metadata.get("proxy_exit_role") != "proxy":
@@ -127,8 +196,14 @@ class TopologyDeployer:
         subnet = config.metadata.get("proxy_client_subnet")
         if not subnet:
             return []
-        return [
+        cleanup_sources_raw = config.metadata.get("proxy_policy_cleanup_sources_json") or "[]"
+        try:
+            cleanup_sources = json.loads(cleanup_sources_raw)
+        except json.JSONDecodeError:
+            cleanup_sources = []
+        commands = [
             (
+                # Proxy must not NAT proxy-client traffic directly to the internet in proxy->exit mode.
                 "if command -v iptables >/dev/null 2>&1; then "
                 'for IFACE in $(ip -o link show 2>/dev/null | awk -F": " \'{print $2}\' | cut -d"@" -f1); do '
                 '[ -n "$IFACE" ] || continue; '
@@ -138,6 +213,28 @@ class TopologyDeployer:
                 "done; "
                 "fi"
             ),
+            f'while ip rule show | grep -Fq "from {subnet} lookup {config.metadata.get("proxy_service_table_id") or "51820"}"; do ip rule del priority 200 from {shlex.quote(subnet)} table {shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")} || ip rule del from {shlex.quote(subnet)} table {shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")} || break; done',
+        ]
+        for index, source in enumerate(cleanup_sources):
+            if not isinstance(source, str) or not source.strip():
+                continue
+            commands.append(
+                f'while ip rule show | grep -Fq "from {source.strip()} lookup {config.metadata.get("proxy_service_table_id") or "51820"}"; do ip rule del priority {100 + index} from {shlex.quote(source.strip())} table {shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")} || ip rule del from {shlex.quote(source.strip())} table {shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")} || break; done'
+            )
+        return commands
+
+    def _build_native_autostart_commands(self, config: RenderedConfig) -> list[str]:
+        interface = shlex.quote(config.interface_name)
+        return [
+            (
+                f'if command -v systemctl >/dev/null 2>&1; then '
+                f'if systemctl list-unit-files 2>/dev/null | grep -Fq "awg-quick@.service"; then '
+                f'systemctl enable awg-quick@{interface}.service >/dev/null 2>&1 || true; '
+                f'elif systemctl list-unit-files 2>/dev/null | grep -Fq "wg-quick@.service"; then '
+                f'systemctl enable wg-quick@{interface}.service >/dev/null 2>&1 || true; '
+                f'fi; '
+                f'fi'
+            )
         ]
 
     def _docker_client_network(self, server: Server, config: RenderedConfig) -> str | None:
@@ -313,6 +410,7 @@ class TopologyDeployer:
                     "sysctl -w net.ipv4.ip_forward=1",
                     f"awg-quick down {interface} || true",
                     f"awg-quick up {interface}",
+                    *self._build_native_autostart_commands(config),
                     *self._build_proxy_exit_proxy_cleanup_commands(config),
                     *self._build_native_nat_commands(server, config),
                     *self._build_proxy_exit_proxy_routing_commands(config),
@@ -439,6 +537,12 @@ class TopologyDeployer:
         table_id = proxy_config.metadata.get("proxy_service_table_id") if proxy_config.metadata else None
         if not table_id:
             raise RuntimeError("Proxy-exit verification failed: proxy service table id is missing")
+        default_subnet_rule = proxy_config.metadata.get("proxy_policy_default_subnet") == "1" if proxy_config.metadata else False
+        source_rules_raw = proxy_config.metadata.get("proxy_policy_sources_json") if proxy_config.metadata else None
+        try:
+            source_rules = json.loads(source_rules_raw or "[]")
+        except json.JSONDecodeError:
+            source_rules = []
 
         proxy_interface = shlex.quote(proxy_config.interface_name)
         proxy_peer_check = (
@@ -450,15 +554,26 @@ class TopologyDeployer:
         if proxy_container:
             proxy_peer_check = f"docker exec {shlex.quote(proxy_container)} sh -lc {shlex.quote(proxy_peer_check)}"
 
-        proxy_verify_command = "\n".join(
+        proxy_verify_lines = ["set -eu"]
+        if default_subnet_rule:
+            proxy_verify_lines.append(
+                f'ip rule show | grep -F "from {subnet} lookup {table_id}" >/dev/null || {{ echo "Missing ip rule from {subnet} lookup {table_id} on proxy" >&2; exit 40; }}'
+            )
+        for source in source_rules:
+            if not isinstance(source, str) or not source.strip():
+                continue
+            proxy_verify_lines.append(
+                f'ip rule show | grep -F "from {source.strip()} lookup {table_id}" >/dev/null || {{ echo "Missing ip rule from {source.strip()} lookup {table_id} on proxy" >&2; exit 40; }}'
+            )
+        proxy_verify_lines.extend(
             [
-                "set -eu",
-                f'ip rule show | grep -F "from {subnet} lookup {table_id}" >/dev/null',
-                f'ip route show table {shlex.quote(table_id)} | grep -F "default dev {proxy_config.interface_name}" >/dev/null',
-                f'ip route show table {shlex.quote(table_id)} | grep -F "{subnet} dev {proxy_config.interface_name}" >/dev/null',
+                f'ip route show table {shlex.quote(table_id)} | grep -F "default dev {proxy_config.interface_name}" >/dev/null || {{ echo "Missing default route via {proxy_config.interface_name} in table {table_id} on proxy" >&2; exit 41; }}',
+                f'ip route show table {shlex.quote(table_id)} | grep -F "{subnet} dev {proxy_config.interface_name}" >/dev/null || {{ echo "Missing subnet route {subnet} via {proxy_config.interface_name} in table {table_id} on proxy" >&2; exit 42; }}',
                 proxy_peer_check,
             ]
         )
+
+        proxy_verify_command = "\n".join(proxy_verify_lines)
         proxy_result = await self.ssh.run_command(
             host=proxy_server.host,
             username=proxy_server.ssh_user,
@@ -566,11 +681,19 @@ class TopologyDeployer:
                 topology_clients = [
                     client
                     for client in (clients or [])
-                    if client.server_id == standard_server.id and client.topology_id == topology.id
+                    if client.server_id == standard_server.id and not client.archived
                 ]
-                if not topology_clients:
-                    topology_clients = [client for client in (clients or []) if client.server_id == standard_server.id]
-                merged_content = self.adopter.render(standard_server, topology_clients, live_config)
+                known_server_public_keys = {
+                    client.public_key
+                    for client in (clients or [])
+                    if client.server_id == standard_server.id and client.public_key
+                }
+                merged_content = self.adopter.render(
+                    standard_server,
+                    topology_clients,
+                    live_config,
+                    known_public_keys=known_server_public_keys,
+                )
                 rendered = [
                     RenderedConfig(
                         server_id=standard_server.id,
@@ -587,45 +710,41 @@ class TopologyDeployer:
                     {standard_server.id: standard_server},
                     key_provider=lambda *_args: (standard_private, "", "", ""),
                 )
-        elif topology.type == TopologyType.PROXY_EXIT:
+        elif topology.type in {TopologyType.PROXY_EXIT, TopologyType.PROXY_MULTI_EXIT}:
             # Render synchronously after preparing real keys.
             proxy_node = next((item for item in nodes if item.role == TopologyNodeRole.PROXY), None)
             if not proxy_node:
-                raise RuntimeError("Proxy-exit topology must contain exactly one proxy node")
+                raise RuntimeError("Proxy topology must contain exactly one proxy node")
 
             exit_nodes = sorted(
                 [item for item in nodes if item.role == TopologyNodeRole.EXIT],
                 key=lambda item: item.priority,
             )
             if not exit_nodes:
-                raise RuntimeError("Proxy-exit topology must contain at least one exit node")
+                raise RuntimeError("Proxy topology must contain at least one exit node")
 
+            proxy_server = servers_by_id[proxy_node.server_id]
+            await key_provider(proxy_server.id, proxy_server.id, "awg0")
             for node in exit_nodes:
-                proxy_server = servers_by_id[proxy_node.server_id]
                 exit_server = servers_by_id[node.server_id]
                 interface_name = f"awg{node.priority}"
-                proxy_private, proxy_public, exit_private, exit_public = await key_provider(
+                await key_provider(
                     proxy_server.id,
                     exit_server.id,
                     interface_name,
                 )
-                proxy_main_private, proxy_main_public, _unused_exit_private, _unused_exit_public = await key_provider(
-                    proxy_server.id,
-                    proxy_server.id,
-                    "awg0",
-                )
-                keypairs_by_scope = {
-                    (proxy_server.id, exit_server.id, interface_name): (proxy_private, proxy_public, exit_private, exit_public),
-                    (proxy_server.id, proxy_server.id, "awg0"): (proxy_main_private, proxy_main_public, "", ""),
-                }
-                rendered.extend(
-                    renderer.render(
-                        topology,
-                        [proxy_node, node],
-                        {proxy_server.id: proxy_server, exit_server.id: exit_server},
-                        key_provider=lambda proxy_id, exit_id, iface_name, _keypairs=keypairs_by_scope: _keypairs[(proxy_id, exit_id, iface_name)],
-                    )
-                )
+            rendered = renderer.render(
+                topology,
+                nodes,
+                servers_by_id,
+                key_provider=lambda proxy_id, exit_id, iface_name: key_cache[(proxy_id, exit_id, iface_name)],
+            )
+            proxy_exit_policy = self._resolve_proxy_exit_policy(
+                topology,
+                proxy_server,
+                exit_nodes,
+                clients,
+            )
 
             proxy_server = servers_by_id[proxy_node.server_id]
             proxy_runtime = {}
@@ -655,6 +774,34 @@ class TopologyDeployer:
                             metadata={"preserve_existing": "1"},
                         ),
                     )
+            proxy_configs = [item for item in rendered if item.metadata and item.metadata.get("proxy_exit_role") == "proxy"]
+            if proxy_configs:
+                all_cleanup_sources = sorted(
+                    {
+                        source_cidr
+                        for client in (clients or [])
+                        if not client.archived and client.server_id == proxy_server.id
+                        for source_cidr in [self._client_source_cidr(client.assigned_ip)]
+                        if source_cidr
+                    }
+                )
+                for proxy_config in proxy_configs:
+                    matched_exit_server = next(
+                        (
+                            node.server_id
+                            for node in exit_nodes
+                            if proxy_config.interface_name == f"awg{node.priority}"
+                        ),
+                        None,
+                    )
+                    if not matched_exit_server:
+                        continue
+                    policy_payload = proxy_exit_policy.get(matched_exit_server, {"is_default": False, "sources": []})
+                    metadata = dict(proxy_config.metadata or {})
+                    metadata["proxy_policy_default_subnet"] = "1" if policy_payload.get("is_default") else "0"
+                    metadata["proxy_policy_sources_json"] = json.dumps(policy_payload.get("sources", []))
+                    metadata["proxy_policy_cleanup_sources_json"] = json.dumps(all_cleanup_sources)
+                    proxy_config.metadata = metadata
         else:
             raise RuntimeError(f"Unsupported topology type for deploy: {topology.type.value}")
 
@@ -673,23 +820,48 @@ class TopologyDeployer:
             else:
                 await self.upload_and_apply(server, config)
 
-        if topology.type == TopologyType.PROXY_EXIT:
-            proxy_config = next(
-                (item for item in rendered if item.metadata and item.metadata.get("proxy_exit_role") == "proxy"),
-                None,
+        if topology.type in {TopologyType.PROXY_EXIT, TopologyType.PROXY_MULTI_EXIT}:
+            proxy_configs = [item for item in rendered if item.metadata and item.metadata.get("proxy_exit_role") == "proxy"]
+            exit_configs = [item for item in rendered if item.metadata and item.metadata.get("proxy_exit_role") == "exit"]
+            if not proxy_configs or not exit_configs or len(proxy_configs) != len(exit_configs):
+                raise RuntimeError("Proxy topology verification failed: rendered proxy/exit configs are incomplete")
+            proxy_subnet = proxy_configs[0].metadata.get("proxy_client_subnet") if proxy_configs[0].metadata else None
+            if not proxy_subnet:
+                raise RuntimeError("Proxy topology deploy failed: proxy client subnet is missing")
+            exit_interface_names = {node.server_id: f"awg{node.priority}" for node in exit_nodes}
+            exit_table_ids = {node.server_id: str(51820 + node.priority) for node in exit_nodes}
+            exit_config_by_server_id = {item.server_id: item for item in exit_configs}
+            for proxy_config in proxy_configs:
+                # Match awgN on proxy back to the exit node with the same priority-derived interface name.
+                matched_exit_server = next(
+                    (
+                        node.server_id
+                        for node in exit_nodes
+                        if proxy_config.interface_name == f"awg{node.priority}"
+                    ),
+                    None,
+                )
+                if not matched_exit_server:
+                    raise RuntimeError(f"Proxy topology verification failed: no exit matches {proxy_config.interface_name}")
+                exit_config = exit_config_by_server_id.get(matched_exit_server)
+                if not exit_config:
+                    raise RuntimeError(f"Proxy topology verification failed: missing exit config for server {matched_exit_server}")
+                await self.verify_proxy_exit_path(
+                    servers_by_id[proxy_config.server_id],
+                    proxy_config,
+                    servers_by_id[exit_config.server_id],
+                    exit_config,
+                )
+            state_content = self.failover_agent.render_state(
+                topology=topology,
+                proxy_server=proxy_server,
+                exit_nodes=exit_nodes,
+                clients=clients or [],
+                proxy_client_subnet=proxy_subnet,
+                exit_interface_names=exit_interface_names,
+                exit_table_ids=exit_table_ids,
             )
-            exit_config = next(
-                (item for item in rendered if item.metadata and item.metadata.get("proxy_exit_role") == "exit"),
-                None,
-            )
-            if not proxy_config or not exit_config:
-                raise RuntimeError("Proxy-exit verification failed: rendered proxy/exit configs are incomplete")
-            await self.verify_proxy_exit_path(
-                servers_by_id[proxy_config.server_id],
-                proxy_config,
-                servers_by_id[exit_config.server_id],
-                exit_config,
-            )
+            await self.failover_agent.install(proxy_server, state_content)
 
         return rendered
 

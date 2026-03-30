@@ -25,6 +25,13 @@ type DeliverySettings = {
   admin_notification_email: string | null;
 };
 
+type BackupSettings = {
+  auto_backup_enabled: boolean;
+  auto_backup_hour_utc: number;
+  backup_retention_days: number;
+  backup_storage_path: string;
+};
+
 type DeliveryTestResult = {
   channel: string;
   status: string;
@@ -55,6 +62,7 @@ export function SettingsPageClient() {
   const { token } = useAuth();
   const { locale } = useLocale();
   const [settings, setSettings] = useState<DeliverySettings | null>(null);
+  const [backupSettings, setBackupSettings] = useState<BackupSettings | null>(null);
   const [smtpPassword, setSmtpPassword] = useState("");
   const [telegramBotToken, setTelegramBotToken] = useState("");
   const [saving, setSaving] = useState(false);
@@ -103,6 +111,13 @@ export function SettingsPageClient() {
         telegramAdminChatId: "Telegram admin chat id",
         testTelegram: "Проверить Telegram",
         telegramHint: "Проверка уйдёт в административный Telegram chat id.",
+        backupsTitle: "Бэкапы",
+        backupsSubtitle: "Автоматическое создание panel backup и очистка старых архивов.",
+        autoBackups: "Автобэкапы панели",
+        backupHourUtc: "Час запуска (UTC)",
+        retentionDays: "Хранить архивы, дней",
+        storagePath: "Путь хранения архивов",
+        storagePathHint: "Путь задаётся через env BACKUP_STORAGE_PATH и меняется вне панели.",
         optionDisabled: "Отключено",
         optionImportantOnly: "Только важное",
         optionAccessChanges: "Доступ и изменения",
@@ -151,6 +166,13 @@ export function SettingsPageClient() {
         telegramAdminChatId: "Telegram admin chat id",
         testTelegram: "Test Telegram",
         telegramHint: "The test message will be sent to the admin Telegram chat id.",
+        backupsTitle: "Backups",
+        backupsSubtitle: "Automatic panel backups and cleanup of old archives.",
+        autoBackups: "Automatic panel backups",
+        backupHourUtc: "Run hour (UTC)",
+        retentionDays: "Keep archives, days",
+        storagePath: "Archive storage path",
+        storagePathHint: "This path is configured via BACKUP_STORAGE_PATH env and is read-only in the panel.",
         optionDisabled: "Disabled",
         optionImportantOnly: "Important only",
         optionAccessChanges: "Access and changes",
@@ -185,7 +207,9 @@ export function SettingsPageClient() {
     }
     try {
       const nextSettings = await apiRequest<DeliverySettings>("/settings/delivery", { token });
+      const nextBackupSettings = await apiRequest<BackupSettings>("/settings/backups", { token });
       setSettings({ ...nextSettings, notification_level: normalizeNotificationLevel(nextSettings.notification_level) });
+      setBackupSettings(nextBackupSettings);
       setError(null);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Failed to load settings");
@@ -198,7 +222,7 @@ export function SettingsPageClient() {
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!token || !settings) {
+    if (!token || !settings || !backupSettings) {
       return;
     }
     setSaving(true);
@@ -215,7 +239,13 @@ export function SettingsPageClient() {
           telegram_bot_token: telegramBotToken.trim() || null,
         },
       });
+      const updatedBackupSettings = await apiRequest<BackupSettings>("/settings/backups", {
+        method: "PATCH",
+        token,
+        body: backupSettings,
+      });
       setSettings({ ...updated, notification_level: normalizeNotificationLevel(updated.notification_level) });
+      setBackupSettings(updatedBackupSettings);
       setSmtpPassword("");
       setTelegramBotToken("");
       setInfo(copy.saveSuccess);
@@ -260,7 +290,7 @@ export function SettingsPageClient() {
       </div>
       {error ? <div className="error-box">{error}</div> : null}
       {info ? <div className="info-box">{info}</div> : null}
-      {!settings ? (
+      {!settings || !backupSettings ? (
         <div className="empty-state">{copy.noData}</div>
       ) : (
         <form className="settings-form" onSubmit={saveSettings}>
@@ -315,6 +345,38 @@ export function SettingsPageClient() {
             <div className="settings-level-help">
               {notificationLevelDescription(settings.notification_level)}
             </div>
+          </section>
+
+          <section className="panel-card settings-module">
+            <div className="settings-module-head">
+              <div>
+                <span className="eyebrow">{copy.backupsTitle}</span>
+                <h3>{copy.backupsTitle}</h3>
+                <p>{copy.backupsSubtitle}</p>
+              </div>
+            </div>
+            <div className="form-grid compact-form-grid">
+              <label className="field">
+                <span>{copy.autoBackups}</span>
+                <select value={backupSettings.auto_backup_enabled ? "on" : "off"} onChange={(event) => setBackupSettings({ ...backupSettings, auto_backup_enabled: event.target.value === "on" })}>
+                  <option value="on">{copy.on}</option>
+                  <option value="off">{copy.off}</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>{copy.backupHourUtc}</span>
+                <input type="number" min={0} max={23} value={backupSettings.auto_backup_hour_utc} onChange={(event) => setBackupSettings({ ...backupSettings, auto_backup_hour_utc: Number(event.target.value) })} />
+              </label>
+              <label className="field">
+                <span>{copy.retentionDays}</span>
+                <input type="number" min={1} value={backupSettings.backup_retention_days} onChange={(event) => setBackupSettings({ ...backupSettings, backup_retention_days: Number(event.target.value) })} />
+              </label>
+              <label className="field">
+                <span>{copy.storagePath}</span>
+                <input value={backupSettings.backup_storage_path} readOnly />
+              </label>
+            </div>
+            <p className="settings-module-note">{copy.storagePathHint}</p>
           </section>
 
           <section className="panel-card settings-module">

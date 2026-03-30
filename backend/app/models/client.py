@@ -32,6 +32,7 @@ class Client(Base, TimestampMixin):
     )
     server_id: Mapped[int | None] = mapped_column(ForeignKey("servers.id", ondelete="SET NULL"), nullable=True)
     topology_id: Mapped[int | None] = mapped_column(nullable=True)
+    exit_server_id: Mapped[int | None] = mapped_column(ForeignKey("servers.id", ondelete="SET NULL"), nullable=True)
     delivery_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     delivery_telegram_chat_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     delivery_telegram_username: Mapped[str | None] = mapped_column(String(255), nullable=True)

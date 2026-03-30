@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     redis_host: str = Field(default="redis", alias="REDIS_HOST")
     redis_port: int = Field(default=6379, alias="REDIS_PORT")
+    backup_storage_path: str = Field(default="/app/backups", alias="BACKUP_STORAGE_PATH")
 
     backend_cors_origins_raw: str = Field(
         default="http://localhost:3000",

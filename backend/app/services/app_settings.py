@@ -27,6 +27,13 @@ class DeliverySettingsPayload:
     admin_notification_email: str | None = None
 
 
+@dataclass
+class BackupSettingsPayload:
+    auto_backup_enabled: bool = False
+    auto_backup_hour_utc: int = 3
+    backup_retention_days: int = 14
+
+
 class AppSettingsService:
     NOTIFICATION_LEVEL_ALIASES: dict[str, str] = {
         "delivery_only": "important_only",
@@ -51,6 +58,13 @@ class AppSettingsService:
         "telegram_bot_token": True,
         "telegram_admin_chat_id": False,
         "admin_notification_email": False,
+    }
+    BACKUP_KEYS: dict[str, bool] = {
+        "auto_backup_enabled": False,
+        "auto_backup_hour_utc": False,
+        "backup_retention_days": False,
+        "last_auto_backup_date": False,
+        "last_backup_cleanup_date": False,
     }
 
     def _get_setting(self, db: Session, key: str) -> AppSetting | None:
@@ -90,6 +104,18 @@ class AppSettingsService:
             admin_notification_email=values["admin_notification_email"],
         )
 
+    def get_backup_settings(self, db: Session) -> BackupSettingsPayload:
+        values = {key: self._get_value(self._get_setting(db, key)) for key in self.BACKUP_KEYS}
+        auto_backup_hour_utc = int(values["auto_backup_hour_utc"] or 3)
+        backup_retention_days = int(values["backup_retention_days"] or 14)
+        auto_backup_hour_utc = min(max(auto_backup_hour_utc, 0), 23)
+        backup_retention_days = max(1, backup_retention_days)
+        return BackupSettingsPayload(
+            auto_backup_enabled=self._bool(values["auto_backup_enabled"]),
+            auto_backup_hour_utc=auto_backup_hour_utc,
+            backup_retention_days=backup_retention_days,
+        )
+
     def update_delivery_settings(self, db: Session, payload: DeliverySettingsPayload) -> DeliverySettingsPayload:
         payload.notification_level = self._normalize_notification_level(payload.notification_level)
         for key, encrypted in self.DELIVERY_KEYS.items():
@@ -108,3 +134,29 @@ class AppSettingsService:
             db.add(setting)
         db.commit()
         return self.get_delivery_settings(db)
+
+    def update_backup_settings(self, db: Session, payload: BackupSettingsPayload) -> BackupSettingsPayload:
+        payload.auto_backup_hour_utc = min(max(int(payload.auto_backup_hour_utc), 0), 23)
+        payload.backup_retention_days = max(1, int(payload.backup_retention_days))
+        for key in ("auto_backup_enabled", "auto_backup_hour_utc", "backup_retention_days"):
+            value = getattr(payload, key)
+            setting = self._get_setting(db, key) or AppSetting(key=key, is_encrypted=False)
+            if isinstance(value, bool):
+                text_value = "true" if value else "false"
+            else:
+                text_value = str(value)
+            setting.value_text = text_value
+            setting.is_encrypted = False
+            db.add(setting)
+        db.commit()
+        return self.get_backup_settings(db)
+
+    def get_raw_backup_marker(self, db: Session, key: str) -> str | None:
+        return self._get_value(self._get_setting(db, key))
+
+    def set_raw_backup_marker(self, db: Session, key: str, value: str) -> None:
+        setting = self._get_setting(db, key) or AppSetting(key=key, is_encrypted=False)
+        setting.value_text = value
+        setting.is_encrypted = False
+        db.add(setting)
+        db.commit()

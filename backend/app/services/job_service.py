@@ -10,6 +10,8 @@ class JobService:
             JobType.DETECT_AWG: "app.workers.tasks.detect_awg",
             JobType.DEPLOY_TOPOLOGY: "app.workers.tasks.deploy_topology",
             JobType.BACKUP: "app.workers.tasks.run_backup",
+            JobType.RESTORE_SERVER: "app.workers.tasks.restore_server_backup",
+            JobType.RESTORE_PANEL: "app.workers.tasks.restore_panel_backup",
         }
         task_name = task_name_map[job.job_type]
         task = celery_app.send_task(task_name, kwargs={"job_id": job.id})

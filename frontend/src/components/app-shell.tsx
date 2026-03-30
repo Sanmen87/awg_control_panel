@@ -16,9 +16,10 @@ const navigation = {
     settings: {
       label: "Settings",
       children: [
-        { href: "/settings", label: "Delivery methods" },
         { href: "/servers", label: "Servers" },
         { href: "/topologies", label: "Topologies" },
+        { href: "/backups", label: "Backups" },
+        { href: "/settings", label: "Delivery methods" },
         { href: "/jobs", label: "Jobs" }
       ]
     }
@@ -31,9 +32,10 @@ const navigation = {
     settings: {
       label: "Настройки",
       children: [
-        { href: "/settings", label: "Способы доставки" },
         { href: "/servers", label: "Серверы" },
         { href: "/topologies", label: "Топологии" },
+        { href: "/backups", label: "Бэкапы" },
+        { href: "/settings", label: "Способы доставки" },
         { href: "/jobs", label: "Задачи" }
       ]
     }
@@ -49,11 +51,11 @@ export function AppShell({
   const { logout, token } = useAuth();
   const { locale, setLocale } = useLocale();
   const [settingsOpen, setSettingsOpen] = useState(
-    pathname.startsWith("/settings") || pathname.startsWith("/servers") || pathname.startsWith("/topologies") || pathname.startsWith("/jobs")
+    pathname.startsWith("/settings") || pathname.startsWith("/servers") || pathname.startsWith("/backups") || pathname.startsWith("/topologies") || pathname.startsWith("/jobs")
   );
   const copy = locale === "ru"
-    ? { title: "Навигация", logout: "Выйти" }
-    : { title: "Navigation", logout: "Logout" };
+    ? { title: "Навигация", logout: "Выйти", madeBy: "Сделано Sunmen87" }
+    : { title: "Navigation", logout: "Logout", madeBy: "Made by Sunmen87" };
   const nav = navigation[locale];
 
   return (
@@ -98,6 +100,7 @@ export function AppShell({
                   type="button"
                   className={
                     settingsOpen || pathname.startsWith("/settings") || pathname.startsWith("/servers") || pathname.startsWith("/topologies") || pathname.startsWith("/jobs")
+                    || pathname.startsWith("/backups")
                       ? "nav-link nav-toggle active"
                       : "nav-link nav-toggle"
                   }
@@ -133,6 +136,12 @@ export function AppShell({
             </div>
           ) : null}
           {children}
+          <footer className="app-footer">
+            <span>{copy.madeBy}</span>
+            <a href="https://github.com/Sanmen87/awg_control_panel" target="_blank" rel="noreferrer">
+              <span aria-hidden="true">◐</span> GitHub
+            </a>
+          </footer>
         </section>
       </div>
     </div>

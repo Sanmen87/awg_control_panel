@@ -45,7 +45,7 @@ def _is_server_ready_for_managed_clients(
     if topology_by_id is not None and nodes_by_server_id is not None:
         for node in nodes_by_server_id.get(server.id, []):
             topology = topology_by_id.get(node.topology_id)
-            if topology and topology.type == TopologyType.PROXY_EXIT and node.role != TopologyNodeRole.PROXY:
+            if topology and topology.type in {TopologyType.PROXY_EXIT, TopologyType.PROXY_MULTI_EXIT} and node.role != TopologyNodeRole.PROXY:
                 return False
     return True
 

@@ -1,6 +1,6 @@
 import enum
 
-from sqlalchemy import Enum, String, Text
+from sqlalchemy import Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -11,6 +11,7 @@ class BackupType(str, enum.Enum):
     DATABASE = "database"
     CONFIGS = "configs"
     FULL = "full"
+    SERVER = "server"
 
 
 class BackupStatus(str, enum.Enum):
@@ -28,6 +29,7 @@ class BackupJob(Base, TimestampMixin):
         Enum(BackupType, name="backup_type", values_callable=enum_values),
         nullable=False,
     )
+    server_id: Mapped[int | None] = mapped_column(ForeignKey("servers.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[BackupStatus] = mapped_column(
         Enum(BackupStatus, name="backup_status", values_callable=enum_values),
         nullable=False,

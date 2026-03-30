@@ -65,6 +65,7 @@ pick_primary_interface() {
   if [ -z "$interfaces" ]; then
     return 0
   fi
+  # Prefer the client-facing awg0/wg0 over topology-owned service links like awg10/awg20.
   for preferred in awg0 wg0; do
     if printf '%s\n' "$interfaces" | tr ' ' '\n' | grep -Fx "$preferred" >/dev/null 2>&1; then
       printf '%s' "$preferred"
@@ -75,6 +76,7 @@ pick_primary_interface() {
 }
 
 pick_primary_config_path() {
+  # Imported/live runtime state should follow the primary client config, not proxy service configs.
   for base in /etc/amnezia/amneziawg /etc/amneziawg /etc/wireguard; do
     for preferred in awg0 wg0; do
       if [ -f "$base/$preferred.conf" ]; then

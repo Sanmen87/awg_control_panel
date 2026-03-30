@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
@@ -11,9 +12,10 @@ from app.models.server import Server
 from app.services.bootstrap_commands import wrap_with_optional_sudo
 from app.services.server_credentials import ServerCredentialsService
 from app.services.server_runtime_paths import (
+    get_config_path,
+    get_docker_container,
     build_read_clients_table_command,
     build_show_dump_command,
-    get_docker_container,
     parse_runtime_details,
 )
 from app.services.ssh import SSHService
@@ -101,6 +103,22 @@ class ClientImportService:
         runtime_details = parse_runtime_details(server)
         command = build_read_clients_table_command(server, runtime_details)
         if not get_docker_container(server, runtime_details):
+            command = wrap_with_optional_sudo(command, self.credentials.get_sudo_password(server))
+        return (await self._run(server, command)).strip()
+
+    async def _fetch_config_text(self, server: Server) -> str:
+        runtime_details = parse_runtime_details(server)
+        config_path = get_config_path(server, runtime_details)
+        if not config_path:
+            return ""
+        docker_container = get_docker_container(server, runtime_details)
+        if docker_container:
+            command = (
+                f"docker exec {shlex.quote(docker_container)} sh -lc "
+                f"{shlex.quote(f'cat {shlex.quote(config_path)} 2>/dev/null || true')}"
+            )
+        else:
+            command = f"sh -lc {shlex.quote(f'cat {shlex.quote(config_path)} 2>/dev/null || true')}"
             command = wrap_with_optional_sudo(command, self.credentials.get_sudo_password(server))
         return (await self._run(server, command)).strip()
 
@@ -217,6 +235,40 @@ class ClientImportService:
             merged.append(candidate)
         return merged
 
+    def _merge_config_and_runtime_peers(
+        self,
+        config_peers: list[dict[str, str]],
+        runtime_peers: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        runtime_by_public_key = {
+            peer.get("public_key", "").strip(): peer
+            for peer in runtime_peers
+            if peer.get("public_key", "").strip()
+        }
+        merged: list[dict[str, str]] = []
+        seen_public_keys: set[str] = set()
+
+        for config_peer in config_peers:
+            public_key = config_peer.get("public_key", "").strip()
+            if not public_key:
+                continue
+            runtime_peer = runtime_by_public_key.get(public_key, {})
+            merged_peer = dict(config_peer)
+            for field in ("endpoint", "latest_handshake", "transfer_rx", "transfer_tx", "persistent_keepalive"):
+                value = runtime_peer.get(field, "")
+                if value:
+                    merged_peer[field] = value
+            merged.append(merged_peer)
+            seen_public_keys.add(public_key)
+
+        for runtime_peer in runtime_peers:
+            public_key = runtime_peer.get("public_key", "").strip()
+            if not public_key or public_key in seen_public_keys:
+                continue
+            merged.append(dict(runtime_peer))
+
+        return merged
+
     async def fetch_peers(self, server: Server) -> list[dict[str, str]]:
         runtime_details = parse_runtime_details(server)
         command = build_show_dump_command(server, runtime_details)
@@ -232,7 +284,10 @@ class ClientImportService:
         )
         if result.exit_status != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to import peers")
-        peers = self._parse_peer_dump(result.stdout.strip())
+        runtime_peers = self._parse_peer_dump(result.stdout.strip())
+        config_text = await self._fetch_config_text(server)
+        config_peers = self._parse_peers_from_config(config_text)
+        peers = self._merge_config_and_runtime_peers(config_peers, runtime_peers) if config_peers else runtime_peers
         clients_table = await self._fetch_clients_table(server)
         return self._merge_clients_table(peers, clients_table)
 
@@ -391,6 +446,37 @@ class ClientImportService:
                     "transfer_rx": transfer_rx,
                     "transfer_tx": transfer_tx,
                     "persistent_keepalive": persistent_keepalive,
+                }
+            )
+        return peers
+
+    def _parse_peers_from_config(self, config_text: str) -> list[dict[str, str]]:
+        peers: list[dict[str, str]] = []
+        for block in re.split(r"\n\s*\n", config_text):
+            if "[Peer]" not in block:
+                continue
+            name = ""
+            comment_match = re.search(r"^#\s*client:\s*(.+)$", block, re.MULTILINE)
+            if comment_match:
+                name = comment_match.group(1).strip()
+            public_key_match = re.search(r"^PublicKey\s*=\s*(.+)$", block, re.MULTILINE)
+            allowed_ips_match = re.search(r"^AllowedIPs\s*=\s*(.+)$", block, re.MULTILINE)
+            preshared_key_match = re.search(r"^PresharedKey\s*=\s*(.+)$", block, re.MULTILINE)
+            endpoint_match = re.search(r"^Endpoint\s*=\s*(.+)$", block, re.MULTILINE)
+            persistent_keepalive_match = re.search(r"^PersistentKeepalive\s*=\s*(.+)$", block, re.MULTILINE)
+            if not public_key_match:
+                continue
+            allowed_ips = allowed_ips_match.group(1).strip() if allowed_ips_match else ""
+            if not allowed_ips or "/" not in allowed_ips:
+                continue
+            peers.append(
+                {
+                    "name": name,
+                    "public_key": public_key_match.group(1).strip(),
+                    "allowed_ips": allowed_ips,
+                    "preshared_key": preshared_key_match.group(1).strip() if preshared_key_match else "",
+                    "endpoint": endpoint_match.group(1).strip() if endpoint_match else "",
+                    "persistent_keepalive": persistent_keepalive_match.group(1).strip() if persistent_keepalive_match else "",
                 }
             )
         return peers

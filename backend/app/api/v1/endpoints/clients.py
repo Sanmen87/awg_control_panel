@@ -209,10 +209,10 @@ def create_managed_client(
     )
     if exit_node and not proxy_node:
         topology = db.query(Topology).filter(Topology.id == exit_node.topology_id).first()
-        if topology and topology.type == TopologyType.PROXY_EXIT:
+        if topology and topology.type in {TopologyType.PROXY_EXIT, TopologyType.PROXY_MULTI_EXIT}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Managed clients for Proxy + 1 exit topologies must be created on the proxy server, not on the exit node.",
+                detail="Managed clients for proxy topologies must be created on the proxy server, not on the exit node.",
             )
     server = _hydrate_server_live_state_from_preview(db, server)
     if server.awg_detected and (not server.live_runtime_details_json or not server.live_address_cidr):
@@ -251,6 +251,7 @@ def create_managed_client(
             source=ClientSource.GENERATED,
             server_id=server.id,
             topology_id=payload.topology_id,
+            exit_server_id=payload.exit_server_id,
             import_note=payload.import_note,
             expires_at=payload.expires_at,
             quiet_hours_start_minute=_parse_quiet_time(payload.quiet_hours_start),
@@ -328,6 +329,8 @@ def update_client(
             client.status = "disabled" if client.policy_disabled_reason else "active"
         else:
             client.status = payload.status
+    if "exit_server_id" in payload.model_fields_set:
+        client.exit_server_id = payload.exit_server_id
     client.import_note = payload.import_note
     if "delivery_email" in payload.model_fields_set:
         client.delivery_email = (payload.delivery_email or "").strip() or None
@@ -388,11 +391,16 @@ def delete_client(
 
     server = db.query(Server).filter(Server.id == client.server_id).first() if client.server_id else None
     client_name = client.name
+    client_public_key = client.public_key
     db.delete(client)
     db.commit()
 
     if server:
-        ClientSyncService().apply_server_clients(db, server)
+        ClientSyncService().apply_server_clients(
+            db,
+            server,
+            removed_public_keys={client_public_key} if client_public_key else None,
+        )
 
     AuditService().log(
         db,
@@ -413,6 +421,11 @@ def import_clients(
     server = db.query(Server).filter(Server.id == payload.server_id).first()
     if not server:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
+    if server.awg_detected:
+        try:
+            server = _hydrate_server_live_state_from_remote(db, server)
+        except Exception:
+            server = _hydrate_server_live_state_from_preview(db, server)
 
     peers = asyncio.run(ClientImportService().fetch_peers(server))
     summary = ClientImportService().import_into_db(db, server, peers)

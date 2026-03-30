@@ -19,6 +19,14 @@ celery_app.conf.update(
         "reconcile-stale-jobs-every-minute": {
             "task": "app.workers.tasks.reconcile_stale_jobs",
             "schedule": crontab(),
-        }
+        },
+        "run-scheduled-backups-every-minute": {
+            "task": "app.workers.tasks.run_scheduled_backups",
+            "schedule": crontab(),
+        },
+        "cleanup-old-backups-every-minute": {
+            "task": "app.workers.tasks.cleanup_old_backups",
+            "schedule": crontab(),
+        },
     },
 )

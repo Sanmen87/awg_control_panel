@@ -1,6 +1,6 @@
 import enum
 
-from sqlalchemy import Enum, String, Text
+from sqlalchemy import Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -35,6 +35,7 @@ class Topology(Base, TimestampMixin):
         default=TopologyStatus.DRAFT,
     )
     active_exit_server_id: Mapped[int | None] = mapped_column(nullable=True)
+    default_exit_server_id: Mapped[int | None] = mapped_column(ForeignKey("servers.id", ondelete="SET NULL"), nullable=True)
     failover_config_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     config_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)

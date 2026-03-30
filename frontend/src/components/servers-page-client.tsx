@@ -54,6 +54,16 @@ type ServerMetadata = {
   resolved_ip?: string;
   network_scope?: string;
   geo_error?: string;
+  failover_agent?: {
+    status?: string;
+    service?: string;
+    active_exit_server_id?: number | null;
+    moved_override_clients?: number | null;
+    last_check_at?: string | null;
+    last_switch_at?: string | null;
+    last_switch_reason?: string | null;
+    last_error?: string | null;
+  };
 };
 
 type Job = {
@@ -143,6 +153,9 @@ export function ServersPageClient() {
           os: "ОС",
           awg: "AWG",
           runtime: "Runtime",
+          failoverAgent: "Failover agent",
+          activeExit: "Активный exit",
+          backupPeers: "Peer-ов на backup",
           topology: "Topology",
           subnet: "Подсеть",
           port: "Порт",
@@ -199,6 +212,9 @@ export function ServersPageClient() {
           os: "OS",
           awg: "AWG",
           runtime: "Runtime",
+          failoverAgent: "Failover agent",
+          activeExit: "Active exit",
+          backupPeers: "Peers on backup",
           topology: "Topology",
           subnet: "Subnet",
           port: "Port",
@@ -351,6 +367,45 @@ export function ServersPageClient() {
       return copy.runtimeOnly;
     }
     return server.config_source === "imported" ? copy.importedLive : copy.generatedLive;
+  }
+
+  function failoverAgentSummary(server: Server) {
+    const metadata = parseMetadata(server);
+    const agent = metadata?.failover_agent;
+    if (!agent) {
+      return "-";
+    }
+    if (agent.service === "running" || agent.status === "running") {
+      return "running";
+    }
+    if (agent.service === "error" || agent.status === "error") {
+      return "error";
+    }
+    return agent.service || agent.status || "unknown";
+  }
+
+  function failoverActiveExit(server: Server) {
+    const metadata = parseMetadata(server);
+    const exitId = metadata?.failover_agent?.active_exit_server_id;
+    if (!exitId) {
+      return null;
+    }
+    return servers.find((item) => item.id === exitId)?.name ?? `#${exitId}`;
+  }
+
+  function failoverReasonLabel(server: Server) {
+    const metadata = parseMetadata(server);
+    const reason = metadata?.failover_agent?.last_switch_reason;
+    if (!reason) {
+      return null;
+    }
+    if (reason === "active-exit-healthcheck-failed") {
+      return locale === "ru" ? "Переключение из-за недоступности текущего exit" : "Switched because the current exit became unavailable";
+    }
+    if (reason === "auto-failback-to-primary") {
+      return locale === "ru" ? "Автовозврат на основной exit" : "Automatic return to the primary exit";
+    }
+    return reason;
   }
 
   function latestServerJob(serverId: number, jobType?: string) {
@@ -629,11 +684,40 @@ export function ServersPageClient() {
                       <span>{copy.labels.os}: {server.os_name ?? "-"} {server.os_version ?? ""}</span>
                       <span>{copy.labels.awg}: {summaryAwg(server, details)}</span>
                       <span>{copy.labels.runtime}: {details?.docker_container ?? details?.runtime ?? "-"}</span>
+                      <span>{copy.labels.failoverAgent}: {failoverAgentSummary(server)}</span>
+                      {failoverActiveExit(server) ? <span>{copy.labels.activeExit}: {failoverActiveExit(server)}</span> : null}
                       <span>{copy.labels.topology}: {server.topology_name ?? copy.labels.notAssigned}</span>
                       <span>{copy.labels.subnet}: {server.live_address_cidr ?? "-"}</span>
                       <span>{copy.labels.port}: {server.live_listen_port ?? "-"}</span>
                       <span>{copy.labels.clients}: {clientCount}</span>
                     </div>
+
+                    {metadata?.failover_agent ? (
+                      <div className="server-failover-card">
+                        <div className="server-failover-head">
+                          <strong>{copy.labels.failoverAgent}</strong>
+                          <span className={`status-badge ${
+                            failoverAgentSummary(server) === "running"
+                              ? "status-succeeded"
+                              : failoverAgentSummary(server) === "error"
+                                ? "status-failed"
+                                : "status-pending"
+                          }`}>
+                            {failoverAgentSummary(server)}
+                          </span>
+                        </div>
+                        <div className="server-meta">
+                          {failoverActiveExit(server) ? <span>{copy.labels.activeExit}: {failoverActiveExit(server)}</span> : null}
+                          {typeof metadata.failover_agent.moved_override_clients === "number" ? (
+                            <span>{copy.labels.backupPeers}: {metadata.failover_agent.moved_override_clients}</span>
+                          ) : null}
+                          {metadata.failover_agent.last_switch_at ? <span>last_switch: {metadata.failover_agent.last_switch_at}</span> : null}
+                        </div>
+                        {failoverReasonLabel(server) ? (
+                          <div className="info-box">{failoverReasonLabel(server)}</div>
+                        ) : null}
+                      </div>
+                    ) : null}
 
                     {!isDebugMessage(server.last_error) && server.last_error ? (
                       <div className="error-box">{server.last_error}</div>
@@ -730,6 +814,10 @@ export function ServersPageClient() {
                         {server.live_config_path ? <span>config: {server.live_config_path}</span> : null}
                         {details?.docker_image ? <span>image: {details.docker_image}</span> : null}
                         {details?.docker_mounts ? <span>mounts: {details.docker_mounts}</span> : null}
+                        {metadata?.failover_agent?.last_check_at ? <span>failover_last_check: {metadata.failover_agent.last_check_at}</span> : null}
+                        {metadata?.failover_agent?.last_switch_at ? <span>failover_last_switch: {metadata.failover_agent.last_switch_at}</span> : null}
+                        {metadata?.failover_agent?.last_switch_reason ? <span>failover_reason: {metadata.failover_agent.last_switch_reason}</span> : null}
+                        {metadata?.failover_agent?.last_error ? <span>failover_error: {metadata.failover_agent.last_error}</span> : null}
                         {metadata?.resolved_ip ? <span>resolved_ip: {metadata.resolved_ip}</span> : null}
                         {metadata?.country_code ? <span>country: {metadata.country_code}</span> : null}
                         {metadata?.geo_error ? <span>geo_error: {metadata.geo_error}</span> : null}
