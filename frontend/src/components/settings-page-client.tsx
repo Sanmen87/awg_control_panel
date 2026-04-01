@@ -111,8 +111,6 @@ export function SettingsPageClient() {
         telegramAdminChatId: "Telegram admin chat id",
         testTelegram: "Проверить Telegram",
         telegramHint: "Проверка уйдёт в административный Telegram chat id.",
-        backupsTitle: "Бэкапы",
-        backupsSubtitle: "Автоматическое создание panel backup и очистка старых архивов.",
         autoBackups: "Автобэкапы панели",
         backupHourUtc: "Час запуска (UTC)",
         retentionDays: "Хранить архивы, дней",
@@ -166,8 +164,6 @@ export function SettingsPageClient() {
         telegramAdminChatId: "Telegram admin chat id",
         testTelegram: "Test Telegram",
         telegramHint: "The test message will be sent to the admin Telegram chat id.",
-        backupsTitle: "Backups",
-        backupsSubtitle: "Automatic panel backups and cleanup of old archives.",
         autoBackups: "Automatic panel backups",
         backupHourUtc: "Run hour (UTC)",
         retentionDays: "Keep archives, days",
@@ -345,38 +341,6 @@ export function SettingsPageClient() {
             <div className="settings-level-help">
               {notificationLevelDescription(settings.notification_level)}
             </div>
-          </section>
-
-          <section className="panel-card settings-module">
-            <div className="settings-module-head">
-              <div>
-                <span className="eyebrow">{copy.backupsTitle}</span>
-                <h3>{copy.backupsTitle}</h3>
-                <p>{copy.backupsSubtitle}</p>
-              </div>
-            </div>
-            <div className="form-grid compact-form-grid">
-              <label className="field">
-                <span>{copy.autoBackups}</span>
-                <select value={backupSettings.auto_backup_enabled ? "on" : "off"} onChange={(event) => setBackupSettings({ ...backupSettings, auto_backup_enabled: event.target.value === "on" })}>
-                  <option value="on">{copy.on}</option>
-                  <option value="off">{copy.off}</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>{copy.backupHourUtc}</span>
-                <input type="number" min={0} max={23} value={backupSettings.auto_backup_hour_utc} onChange={(event) => setBackupSettings({ ...backupSettings, auto_backup_hour_utc: Number(event.target.value) })} />
-              </label>
-              <label className="field">
-                <span>{copy.retentionDays}</span>
-                <input type="number" min={1} value={backupSettings.backup_retention_days} onChange={(event) => setBackupSettings({ ...backupSettings, backup_retention_days: Number(event.target.value) })} />
-              </label>
-              <label className="field">
-                <span>{copy.storagePath}</span>
-                <input value={backupSettings.backup_storage_path} readOnly />
-              </label>
-            </div>
-            <p className="settings-module-note">{copy.storagePathHint}</p>
           </section>
 
           <section className="panel-card settings-module">

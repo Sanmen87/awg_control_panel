@@ -9,6 +9,7 @@ from app.models.failover_event import FailoverEvent
 from app.models.job import DeploymentJob
 from app.models.server import Server
 from app.models.server_runtime_sample import ServerRuntimeSample
+from app.models.service_instance import ServiceInstance
 from app.models.topology import Topology
 from app.models.topology_node import TopologyNode
 from app.models.user import User
@@ -25,6 +26,7 @@ __all__ = [
     "FailoverEvent",
     "Server",
     "ServerRuntimeSample",
+    "ServiceInstance",
     "Topology",
     "TopologyNode",
     "User",

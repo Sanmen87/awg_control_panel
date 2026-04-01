@@ -171,6 +171,43 @@ Notes:
 - QR enlarge-on-click
 - source, runtime, status, and actions shown with unified pictograms
 
+#### Backups
+
+- `full bundle` is the main backup format
+- bundle includes:
+  - panel PostgreSQL dump
+  - server runtime/config snapshots when available
+  - unified `manifest.json`
+- backup storage path is configured through `BACKUP_STORAGE_PATH`
+- automatic backup retention and cleanup are supported
+- uploaded bundles are handled separately in UI
+- restore flow is manual and bundle-oriented:
+  - panel restore from uploaded bundle
+  - selected server restore from uploaded bundle
+- local/generated backups are not mixed into the restore list in the UI
+
+#### Extra Services
+
+- separate main-menu section: `Extra services`
+- current first service: `MTProxy`
+- eligible targets:
+  - exit nodes of proxy topologies
+  - standalone standard servers
+- current MTProxy mode is practical `script-mode`
+  - uses `telegrammessenger/proxy`
+  - uses Fake TLS secret in `ee...` format
+  - requires a short domain up to 15 bytes, for example `vk.com` or `ya.ru`
+- panel can:
+  - install MTProxy on a server
+  - show endpoint, mode, tg-link and linked install job
+  - refresh live status from server
+  - delete MTProxy both from panel and from server
+  - send MTProxy access link by email
+- current manual status refresh checks the remote Docker container over SSH
+- current delete flow removes:
+  - container `awg-mtproxy-*`
+  - remote directory `/opt/awg-extra-services/mtproxy-*`
+
 ### Important implementation details
 
 #### Real server paths
@@ -405,6 +442,43 @@ sudo docker compose up -d backend worker scheduler frontend nginx
 - отдельная модалка настроек по шестерёнке
 - QR можно увеличить кликом
 - источник, runtime, статус и действия показаны через единый набор пиктограмм
+
+#### Бэкапы
+
+- основной формат резервной копии сейчас: `full bundle`
+- bundle включает:
+  - дамп PostgreSQL панели
+  - snapshots конфигов/runtime серверов, если они доступны
+  - единый `manifest.json`
+- путь хранения архивов задаётся через `BACKUP_STORAGE_PATH`
+- поддерживаются retention и автоочистка архивов
+- загруженные bundle-архивы в UI обрабатываются отдельно
+- restore сейчас ручной и bundle-ориентированный:
+  - restore панели из загруженного bundle
+  - restore выбранного сервера из загруженного bundle
+- локально созданные архивы не смешиваются в UI со списком restore-архивов
+
+#### Доп сервисы
+
+- отдельный раздел основного меню: `Доп сервисы`
+- первый реализованный сервис: `MTProxy`
+- разрешённые цели установки:
+  - exit-ноды proxy-topology
+  - standalone standard-серверы
+- текущий режим MTProxy: практический `script-mode` работает в текущих российских реалиях
+  - используется `telegrammessenger/proxy`
+  - используется Fake TLS secret формата `ee...`
+  - нужен короткий домен до 15 байт, например `vk.com` или `ya.ru`
+- панель умеет:
+  - ставить MTProxy на сервер
+  - показывать endpoint, режим, tg-link и связанную install-задачу
+  - вручную обновлять live-статус с сервера
+  - удалять MTProxy и из панели, и с сервера
+  - отправлять ссылку доступа по email
+- ручная проверка статуса сейчас идёт по SSH через проверку remote Docker container
+- при удалении сейчас также удаляются:
+  - контейнер `awg-mtproxy-*`
+  - remote directory `/opt/awg-extra-services/mtproxy-*`
 
 ### Важные технические детали
 

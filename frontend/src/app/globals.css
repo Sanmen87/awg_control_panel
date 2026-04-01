@@ -1301,6 +1301,53 @@ a {
   justify-content: flex-end;
 }
 
+.extra-service-meta-grid {
+  display: grid;
+  gap: 12px 18px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.extra-service-meta-item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.extra-service-meta-item-wide {
+  grid-column: 1 / -1;
+}
+
+.extra-service-meta-item a,
+.extra-service-meta-item span {
+  overflow-wrap: anywhere;
+}
+
+.extra-service-meta-label {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.extra-service-delivery-header {
+  display: grid;
+  gap: 4px;
+}
+
+.extra-service-delivery-row {
+  display: grid;
+  gap: 8px;
+}
+
+.extra-service-form {
+  width: min(640px, 100%);
+}
+
+.extra-service-form .input {
+  width: 100%;
+  min-width: 0;
+}
+
 .clients-floating-toast {
   position: fixed;
   top: 28px;

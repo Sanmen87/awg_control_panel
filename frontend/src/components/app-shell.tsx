@@ -11,7 +11,8 @@ const navigation = {
   en: {
     single: [
       { href: "/", label: "Dashboard" },
-      { href: "/clients", label: "Clients" }
+      { href: "/clients", label: "Clients" },
+      { href: "/extra-services", label: "Extra services" }
     ],
     settings: {
       label: "Settings",
@@ -27,7 +28,8 @@ const navigation = {
   ru: {
     single: [
       { href: "/", label: "Дашборд" },
-      { href: "/clients", label: "Клиенты" }
+      { href: "/clients", label: "Клиенты" },
+      { href: "/extra-services", label: "Доп сервисы" }
     ],
     settings: {
       label: "Настройки",

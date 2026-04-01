@@ -13,6 +13,8 @@ from urllib import parse, request
 from sqlalchemy.orm import Session
 
 from app.models.client import Client
+from app.models.server import Server
+from app.models.service_instance import ServiceInstance
 from app.models.delivery_log import DeliveryLog
 from app.services.app_settings import AppSettingsService
 from app.services.client_materials import ClientMaterialsService
@@ -349,6 +351,51 @@ class DeliveryService:
             use_tls=settings.smtp_use_tls,
         ) as smtp:
             smtp.send_message(msg)
+
+    def _build_mtproxy_delivery_text(self, service: ServiceInstance, server: Server) -> str:
+        config: dict[str, object] = {}
+        if service.config_json:
+            try:
+                loaded = json.loads(service.config_json)
+                if isinstance(loaded, dict):
+                    config = loaded
+            except json.JSONDecodeError:
+                config = {}
+        tg_url = str(config.get("tg_url") or "")
+        domain = str(config.get("domain") or "")
+        port = str(config.get("port") or "443")
+        lines = [
+            "Доступ к MTProxy / MTProxy access",
+            "",
+            f"Сервер / Server: {server.name} ({server.host})",
+            f"Порт / Port: {port}",
+            f"Endpoint: {service.public_endpoint or f'{server.host}:{port}'}",
+            f"Fake TLS domain: {domain or '-'}",
+            "",
+            "Быстрый старт / Quick start:",
+            "1. Откройте Telegram на устройстве. / Open Telegram on your device.",
+            "2. Перейдите по ссылке MTProxy ниже. / Open the MTProxy link below.",
+            "3. Подтвердите подключение к прокси в Telegram. / Confirm proxy setup in Telegram.",
+        ]
+        if tg_url:
+            lines.extend(["", f"MTProxy link: {tg_url}"])
+        else:
+            lines.extend(["", "MTProxy link is not available in panel yet."])
+        return "\n".join(lines)
+
+    def send_mtproxy_email(self, db: Session, service: ServiceInstance, server: Server, target_email: str) -> str:
+        settings = self.settings.get_delivery_settings(db)
+        if not settings.delivery_email_enabled:
+            raise RuntimeError("Email delivery is disabled")
+        if not settings.smtp_host or not settings.smtp_from_email or not settings.smtp_password:
+            raise RuntimeError("SMTP settings are incomplete")
+        self._send_text_email(
+            db,
+            target_email,
+            f"MTProxy access for {server.name}",
+            self._build_mtproxy_delivery_text(service, server),
+        )
+        return f"MTProxy access sent to {target_email}"
 
     def send_test_email(self, db: Session) -> str:
         settings = self.settings.get_delivery_settings(db)

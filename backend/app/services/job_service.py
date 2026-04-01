@@ -9,6 +9,7 @@ class JobService:
             JobType.CHECK_SERVER: "app.workers.tasks.check_server",
             JobType.DETECT_AWG: "app.workers.tasks.detect_awg",
             JobType.DEPLOY_TOPOLOGY: "app.workers.tasks.deploy_topology",
+            JobType.INSTALL_EXTRA_SERVICE: "app.workers.tasks.install_extra_service",
             JobType.BACKUP: "app.workers.tasks.run_backup",
             JobType.RESTORE_SERVER: "app.workers.tasks.restore_server_backup",
             JobType.RESTORE_PANEL: "app.workers.tasks.restore_panel_backup",

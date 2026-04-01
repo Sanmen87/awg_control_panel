@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import secrets
 from pathlib import Path
 from datetime import UTC, datetime, timedelta
 
@@ -12,6 +13,7 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.job import DeploymentJob, JobStatus, JobType
 from app.models.server import AWGStatus, AccessStatus, InstallMethod, Server, ServerStatus
+from app.models.service_instance import ServiceInstance
 from app.models.topology import Topology, TopologyStatus, TopologyType
 from app.models.topology_node import TopologyNode, TopologyNodeRole
 from app.services.awg_detection import DETECT_AWG_COMMAND, parse_detection_output
@@ -38,6 +40,21 @@ from app.services.standard_config_inspector import StandardConfigInspector
 from app.services.topology_deployer import deploy_topology_sync
 from app.services.topology_renderer import TopologyRenderer
 from app.workers.celery_app import celery_app
+
+
+def _build_mtproxy_fake_tls_secret(domain: str, secret: str | None = None) -> str:
+    normalized_domain = domain.strip().lower()
+    if not normalized_domain:
+        raise ValueError("Fake TLS domain is required")
+    domain_hex = normalized_domain.encode("utf-8").hex()
+    if len(domain_hex) > 30:
+        raise ValueError("Fake TLS domain is too long for script-mode secret")
+    raw = (secret or "").strip().lower()
+    if raw.startswith("ee") and len(raw) == 32:
+        return raw
+    padding_len = 30 - len(domain_hex)
+    random_hex = secrets.token_hex(15)[:padding_len]
+    return f"ee{domain_hex}{random_hex}"
 
 
 def _extract_rendered_config_value(content: str, key: str) -> str | None:
@@ -139,6 +156,282 @@ def _load_job_and_server(job_id: int) -> tuple[Session, DeploymentJob | None, Se
     if job and job.server_id:
         server = db.query(Server).filter(Server.id == job.server_id).first()
     return db, job, server
+
+
+def _load_job_service_and_server(job_id: int) -> tuple[Session, DeploymentJob | None, ServiceInstance | None, Server | None]:
+    db: Session = SessionLocal()
+    job = db.query(DeploymentJob).filter(DeploymentJob.id == job_id).first()
+    service = None
+    server = None
+    if job and job.result_message and job.result_message.startswith("ExtraService:"):
+        raw_tail = job.result_message.split(":", maxsplit=1)[1]
+        raw_id = raw_tail.split("|", maxsplit=1)[0].strip()
+        if raw_id.isdigit():
+            service_id = int(raw_id)
+            service = db.query(ServiceInstance).filter(ServiceInstance.id == service_id).first()
+            if service:
+                server = db.query(Server).filter(Server.id == service.server_id).first()
+    return db, job, service, server
+
+
+def _latest_install_job_for_service(db: Session, service_id: int) -> DeploymentJob | None:
+    jobs = (
+        db.query(DeploymentJob)
+        .filter(DeploymentJob.job_type == JobType.INSTALL_EXTRA_SERVICE)
+        .order_by(DeploymentJob.updated_at.desc(), DeploymentJob.id.desc())
+        .all()
+    )
+    for job in jobs:
+        if not job.result_message or not job.result_message.startswith("ExtraService:"):
+            continue
+        raw_tail = job.result_message.split(":", maxsplit=1)[1]
+        raw_id = raw_tail.split("|", maxsplit=1)[0].strip()
+        if raw_id.isdigit() and int(raw_id) == service_id:
+            return job
+    return None
+
+
+def _sync_mtproxy_service(db: Session, service: ServiceInstance, server: Server) -> None:
+    creds = ServerCredentialsService()
+    ssh = SSHService()
+    config = json.loads(service.config_json) if service.config_json else {}
+    runtime = json.loads(service.runtime_details_json) if service.runtime_details_json else {}
+    port = int(config.get("port") or 443)
+    container_name = str(runtime.get("container_name") or config.get("container_name") or f"awg-mtproxy-{service.id}")
+    image_name = str(runtime.get("image_name") or config.get("image_name") or "telegrammessenger/proxy:latest")
+    remote_dir = str(runtime.get("remote_dir") or config.get("remote_dir") or f"/opt/awg-extra-services/mtproxy-{service.id}")
+    domain = str(config.get("domain") or "").strip()
+    secret = str(config.get("secret") or "").strip().lower()
+    if not secret:
+        secret = _build_mtproxy_fake_tls_secret(domain)
+    tg_url = str(config.get("tg_url") or "")
+    command = wrap_with_optional_sudo(
+        f"""
+set -e
+if ! command -v docker >/dev/null 2>&1; then
+  echo status=missing
+  exit 0
+fi
+container_status="$(docker inspect -f '{{{{.State.Status}}}}' {container_name} 2>/dev/null || true)"
+if [ -z "${{container_status:-}}" ]; then
+  echo status=missing
+  exit 0
+fi
+echo status="$container_status"
+""".strip(),
+        creds.get_sudo_password(server),
+    )
+    result = asyncio.run(
+        ssh.run_command(
+            host=server.host,
+            username=server.ssh_user,
+            port=server.ssh_port,
+            password=creds.get_ssh_password(server),
+            private_key=creds.get_private_key(server),
+            command=command,
+            timeout_seconds=120,
+        )
+    )
+    if result.exit_status != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Unable to inspect MTProxy container")
+
+    remote_status = "unknown"
+    for line in result.stdout.splitlines():
+        if line.startswith("status="):
+            remote_status = line.split("=", maxsplit=1)[1].strip()
+            break
+
+    latest_job = _latest_install_job_for_service(db, service.id)
+
+    if remote_status == "running":
+        if not secret:
+            secret = _build_mtproxy_fake_tls_secret(domain)
+        if not tg_url:
+            tg_url = f"tg://proxy?server={server.host}&port={port}&secret={secret}"
+        config.update(
+            {
+                "repo_url": "https://github.com/TelegramMessenger/MTProxy",
+                "image_mode": "official_docker_fake_tls",
+                "port": port,
+                "domain": domain or None,
+                "secret": secret,
+                "tg_url": tg_url,
+                "container_name": container_name,
+                "image_name": image_name,
+                "remote_dir": remote_dir,
+                "install_state": "installed",
+            }
+        )
+        service.status = "running"
+        service.public_endpoint = f"{server.host}:{port}"
+        service.config_json = json.dumps(config)
+        service.runtime_details_json = json.dumps(
+            {
+                "container_name": container_name,
+                "image_name": image_name,
+                "remote_dir": remote_dir,
+                "container_status": remote_status,
+            }
+        )
+        service.last_error = None
+        db.add(service)
+        if latest_job and latest_job.status in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.FAILED}:
+            latest_job.status = JobStatus.SUCCEEDED
+            latest_job.result_message = f"ExtraService:{service.id}|MTProxy confirmed running on {server.name}"
+            db.add(latest_job)
+        return
+
+    if remote_status in {"created", "restarting", "paused"}:
+        service.status = "installing"
+    elif remote_status in {"exited", "dead", "missing"}:
+        service.status = "error"
+        service.last_error = f"MTProxy container state: {remote_status}"
+    else:
+        service.status = remote_status
+    runtime.update(
+        {
+            "container_name": container_name,
+            "image_name": image_name,
+            "remote_dir": remote_dir,
+            "container_status": remote_status,
+        }
+    )
+    service.runtime_details_json = json.dumps(runtime)
+    db.add(service)
+    if latest_job and latest_job.status in {JobStatus.PENDING, JobStatus.RUNNING} and remote_status in {"exited", "dead", "missing"}:
+        latest_job.status = JobStatus.FAILED
+        latest_job.result_message = f"ExtraService:{service.id}|MTProxy container state: {remote_status}"
+        db.add(latest_job)
+
+
+@celery_app.task(name="app.workers.tasks.install_extra_service")
+def install_extra_service(job_id: int) -> None:
+    db, job, service, server = _load_job_service_and_server(job_id)
+    if not job or not service or not server:
+        db.close()
+        return
+    try:
+        job.status = JobStatus.RUNNING
+        job.result_message = f"ExtraService:{service.id}|installing"
+        service.status = "installing"
+        db.add_all([job, service])
+        db.commit()
+
+        creds = ServerCredentialsService()
+        ssh = SSHService()
+        config = json.loads(service.config_json) if service.config_json else {}
+        port = int(config.get("port") or 443)
+        stats_port = int(config.get("stats_port") or 8888)
+        domain = str(config.get("domain") or "").strip()
+        secret = _build_mtproxy_fake_tls_secret(domain, str(config.get("secret") or ""))
+        remote_dir = f"/opt/awg-extra-services/mtproxy-{service.id}"
+        container_name = f"awg-mtproxy-{service.id}"
+        image_name = "telegrammessenger/proxy:latest"
+        tg_url = f"tg://proxy?server={server.host}&port={port}&secret={secret}"
+
+        prep_command = wrap_with_optional_sudo(
+            f"""
+set -e
+mkdir -p {remote_dir}/data
+if ! command -v docker >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y docker.io ca-certificates curl git
+    systemctl enable docker || true
+    systemctl restart docker || service docker restart || true
+  else
+    echo "Docker is required for MTProxy install and automatic installation is supported only on apt-based hosts" >&2
+    exit 1
+  fi
+fi
+docker rm -f {container_name} >/dev/null 2>&1 || true
+""".strip(),
+            creds.get_sudo_password(server),
+        )
+        prep_result = asyncio.run(
+            ssh.run_command(
+                host=server.host,
+                username=server.ssh_user,
+                port=server.ssh_port,
+                password=creds.get_ssh_password(server),
+                private_key=creds.get_private_key(server),
+                command=prep_command,
+                timeout_seconds=900,
+            )
+        )
+        if prep_result.exit_status != 0:
+            raise RuntimeError(prep_result.stderr.strip() or prep_result.stdout.strip() or "MTProxy prepare failed")
+
+        install_command = wrap_with_optional_sudo(
+            f"""
+set -e
+docker rm -f {container_name} >/dev/null 2>&1 || true
+docker pull {image_name}
+docker run -d \
+  --name {container_name} \
+  --restart unless-stopped \
+  -p {port}:443/tcp \
+  -e SECRET={secret} \
+  {image_name}
+docker ps --filter name={container_name} --format '{{{{.Names}}}}'
+""".strip(),
+            creds.get_sudo_password(server),
+        )
+        install_result = asyncio.run(
+            ssh.run_command(
+                host=server.host,
+                username=server.ssh_user,
+                port=server.ssh_port,
+                password=creds.get_ssh_password(server),
+                private_key=creds.get_private_key(server),
+                command=install_command,
+                timeout_seconds=3600,
+            )
+        )
+        if install_result.exit_status != 0:
+            raise RuntimeError(install_result.stderr.strip() or install_result.stdout.strip() or "MTProxy install failed")
+
+        config.update(
+            {
+                "repo_url": "https://github.com/TelegramMessenger/MTProxy",
+                "image_mode": "official_docker_fake_tls",
+                "port": port,
+                "domain": domain or None,
+                "secret": secret,
+                "tg_url": tg_url,
+                "remote_dir": remote_dir,
+                "container_name": container_name,
+                "image_name": image_name,
+                "install_state": "installed",
+            }
+        )
+        service.status = "running"
+        service.public_endpoint = f"{server.host}:{port}"
+        service.config_json = json.dumps(config)
+        service.runtime_details_json = json.dumps(
+            {
+                "container_name": container_name,
+                "image_name": image_name,
+                "remote_dir": remote_dir,
+                "stats_port": stats_port,
+            }
+        )
+        service.last_error = None
+        job.status = JobStatus.SUCCEEDED
+        job.result_message = f"ExtraService:{service.id}|MTProxy installed on {server.name}"
+        db.add_all([job, service])
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        job.status = JobStatus.FAILED
+        job.result_message = f"ExtraService:{service.id}|{str(exc)}"
+        service.status = "error"
+        service.last_error = str(exc)
+        db.add_all([job, service])
+        db.commit()
+    finally:
+        db.close()
 
 
 @celery_app.task(name="app.workers.tasks.bootstrap_server")
@@ -656,6 +949,31 @@ def sync_server_runtime_metrics() -> None:
     except Exception:  # noqa: BLE001
         db.rollback()
         raise
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.workers.tasks.sync_extra_service_runtime")
+def sync_extra_service_runtime() -> None:
+    db: Session = SessionLocal()
+    try:
+        services = db.query(ServiceInstance).filter(ServiceInstance.service_type == "mtproxy").all()
+        for service in services:
+            server = db.query(Server).filter(Server.id == service.server_id).first()
+            if not server:
+                continue
+            try:
+                _sync_mtproxy_service(db, service, server)
+                db.commit()
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                service = db.query(ServiceInstance).filter(ServiceInstance.id == service.id).first()
+                if not service:
+                    continue
+                service.status = "error"
+                service.last_error = str(exc)
+                db.add(service)
+                db.commit()
     finally:
         db.close()
 

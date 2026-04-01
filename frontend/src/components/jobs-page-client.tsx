@@ -71,6 +71,13 @@ export function JobsPageClient() {
 
   useEffect(() => {
     void loadJobs();
+    if (!token) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      void loadJobs();
+    }, 10000);
+    return () => window.clearInterval(intervalId);
   }, [token]);
 
   return (

@@ -12,6 +12,7 @@ class JobType(str, enum.Enum):
     DEPLOY_TOPOLOGY = "deploy-topology"
     CHECK_SERVER = "check-server"
     DETECT_AWG = "detect-awg"
+    INSTALL_EXTRA_SERVICE = "install-extra-service"
     BACKUP = "backup"
     RESTORE_SERVER = "restore-server"
     RESTORE_PANEL = "restore-panel"

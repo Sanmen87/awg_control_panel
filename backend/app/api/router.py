@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, backups, clients, dashboard, health, jobs, logs, servers, settings, topology_nodes, topologies
+from app.api.v1.endpoints import auth, backups, clients, dashboard, extra_services, health, jobs, logs, servers, settings, topology_nodes, topologies
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
@@ -13,4 +13,5 @@ api_router.include_router(topologies.router, prefix="/topologies", tags=["topolo
 api_router.include_router(topology_nodes.router, prefix="/topology-nodes", tags=["topology-nodes"])
 api_router.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 api_router.include_router(backups.router, prefix="/backups", tags=["backups"])
+api_router.include_router(extra_services.router, prefix="/extra-services", tags=["extra-services"])
 api_router.include_router(logs.router, prefix="/logs", tags=["logs"])
