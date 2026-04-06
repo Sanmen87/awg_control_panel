@@ -189,7 +189,10 @@ Notes:
 #### Extra Services
 
 - separate main-menu section: `Extra services`
-- current first service: `MTProxy`
+- currently implemented services:
+  - `MTProxy`
+  - `SOCKS5`
+  - `Xray / VLESS + Reality`
 - eligible targets:
   - exit nodes of proxy topologies
   - standalone standard servers
@@ -203,10 +206,24 @@ Notes:
   - refresh live status from server
   - delete MTProxy both from panel and from server
   - send MTProxy access link by email
+- SOCKS5 is available as a secondary extra service:
+  - docker-based install on the same eligible nodes
+  - generated username / password
+  - refresh status, delete from server, and email delivery
+- Xray is available in `VLESS + Reality` mode:
+  - docker-based install
+  - generated `UUID`, `shortId`, and `x25519` keypair
+  - ready-to-import `vless://` link for clients with Reality support
+  - current practical mask-domain default is `www.apple.com`
+  - current tested working path is suitable for iPhone clients
 - current manual status refresh checks the remote Docker container over SSH
 - current delete flow removes:
   - container `awg-mtproxy-*`
   - remote directory `/opt/awg-extra-services/mtproxy-*`
+- current install UI is presented as three aligned service cards
+  - shared white card layout
+  - aligned install actions
+  - copy-to-clipboard action in connection blocks for MTProxy and Xray
 
 ### Important implementation details
 
@@ -461,7 +478,10 @@ sudo docker compose up -d backend worker scheduler frontend nginx
 #### Доп сервисы
 
 - отдельный раздел основного меню: `Доп сервисы`
-- первый реализованный сервис: `MTProxy`
+- сейчас реализованы сервисы:
+  - `MTProxy`
+  - `SOCKS5`
+  - `Xray / VLESS + Reality`
 - разрешённые цели установки:
   - exit-ноды proxy-topology
   - standalone standard-серверы
@@ -475,10 +495,24 @@ sudo docker compose up -d backend worker scheduler frontend nginx
   - вручную обновлять live-статус с сервера
   - удалять MTProxy и из панели, и с сервера
   - отправлять ссылку доступа по email
+- `SOCKS5` доступен как второй допсервис:
+  - docker-установка на те же допустимые серверы
+  - автогенерация логина и пароля
+  - refresh status, удаление с сервера и email delivery
+- `Xray` доступен в режиме `VLESS + Reality`:
+  - docker-установка
+  - генерация `UUID`, `shortId` и `x25519` keypair
+  - готовая `vless://` ссылка для импорта в клиенты с поддержкой Reality
+  - текущий практический домен по умолчанию: `www.apple.com`
+  - текущий проверенный рабочий сценарий подходит для iPhone-клиентов
 - ручная проверка статуса сейчас идёт по SSH через проверку remote Docker container
 - при удалении сейчас также удаляются:
   - контейнер `awg-mtproxy-*`
   - remote directory `/opt/awg-extra-services/mtproxy-*`
+- UI установки сейчас приведён к общему карточному виду для трёх сервисов:
+  - одинаковая белая подложка
+  - выровненные install-кнопки
+  - copy-to-clipboard в блоках подключения для MTProxy и Xray
 
 ### Важные технические детали
 

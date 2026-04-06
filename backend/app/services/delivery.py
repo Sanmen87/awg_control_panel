@@ -383,6 +383,77 @@ class DeliveryService:
             lines.extend(["", "MTProxy link is not available in panel yet."])
         return "\n".join(lines)
 
+    def _build_socks5_delivery_text(self, service: ServiceInstance, server: Server) -> str:
+        config: dict[str, object] = {}
+        if service.config_json:
+            try:
+                loaded = json.loads(service.config_json)
+                if isinstance(loaded, dict):
+                    config = loaded
+            except json.JSONDecodeError:
+                config = {}
+        port = str(config.get("port") or "1080")
+        username = str(config.get("username") or "")
+        password = str(config.get("password") or "")
+        endpoint = service.public_endpoint or f"{server.host}:{port}"
+        lines = [
+            "Доступ к SOCKS5 / SOCKS5 access",
+            "",
+            f"Сервер / Server: {server.name} ({server.host})",
+            f"Порт / Port: {port}",
+            f"Endpoint: {endpoint}",
+            f"Логин / Username: {username or '-'}",
+            f"Пароль / Password: {password or '-'}",
+            "",
+            "Быстрый старт / Quick start:",
+            "1. Откройте настройки прокси в приложении или системе. / Open proxy settings in your app or system.",
+            "2. Выберите SOCKS5. / Select SOCKS5.",
+            f"3. Укажите сервер {server.host} и порт {port}. / Set host {server.host} and port {port}.",
+        ]
+        if username and password:
+            lines.append("4. Введите логин и пароль из письма. / Enter the username and password from this email.")
+        lines.extend(
+            [
+                "",
+                "Пример URI / Example URI:",
+                f"socks5://{username}:{password}@{server.host}:{port}" if username and password else f"socks5://{server.host}:{port}",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _build_xray_delivery_text(self, service: ServiceInstance, server: Server) -> str:
+        config: dict[str, object] = {}
+        if service.config_json:
+            try:
+                loaded = json.loads(service.config_json)
+                if isinstance(loaded, dict):
+                    config = loaded
+            except json.JSONDecodeError:
+                config = {}
+        port = str(config.get("port") or "443")
+        server_name = str(config.get("server_name") or "")
+        public_key = str(config.get("public_key") or "")
+        short_id = str(config.get("short_id") or "")
+        uuid_value = str(config.get("uuid") or "")
+        client_uri = str(config.get("client_uri") or "")
+        lines = [
+            "Доступ к Xray / VLESS + Reality",
+            "",
+            f"Сервер / Server: {server.name} ({server.host})",
+            f"Порт / Port: {port}",
+            f"SNI / Server name: {server_name or '-'}",
+            f"UUID: {uuid_value or '-'}",
+            f"Public key: {public_key or '-'}",
+            f"Short ID: {short_id or '-'}",
+            "",
+            "Быстрый старт / Quick start:",
+            "1. Откройте iPhone-клиент с поддержкой VLESS + Reality. / Open an iPhone client which supports VLESS + Reality.",
+            "2. Импортируйте ссылку ниже. / Import the link below.",
+        ]
+        if client_uri:
+            lines.extend(["", f"VLESS link: {client_uri}"])
+        return "\n".join(lines)
+
     def send_mtproxy_email(self, db: Session, service: ServiceInstance, server: Server, target_email: str) -> str:
         settings = self.settings.get_delivery_settings(db)
         if not settings.delivery_email_enabled:
@@ -396,6 +467,34 @@ class DeliveryService:
             self._build_mtproxy_delivery_text(service, server),
         )
         return f"MTProxy access sent to {target_email}"
+
+    def send_socks5_email(self, db: Session, service: ServiceInstance, server: Server, target_email: str) -> str:
+        settings = self.settings.get_delivery_settings(db)
+        if not settings.delivery_email_enabled:
+            raise RuntimeError("Email delivery is disabled")
+        if not settings.smtp_host or not settings.smtp_from_email or not settings.smtp_password:
+            raise RuntimeError("SMTP settings are incomplete")
+        self._send_text_email(
+            db,
+            target_email,
+            f"SOCKS5 access for {server.name}",
+            self._build_socks5_delivery_text(service, server),
+        )
+        return f"SOCKS5 access sent to {target_email}"
+
+    def send_xray_email(self, db: Session, service: ServiceInstance, server: Server, target_email: str) -> str:
+        settings = self.settings.get_delivery_settings(db)
+        if not settings.delivery_email_enabled:
+            raise RuntimeError("Email delivery is disabled")
+        if not settings.smtp_host or not settings.smtp_from_email or not settings.smtp_password:
+            raise RuntimeError("SMTP settings are incomplete")
+        self._send_text_email(
+            db,
+            target_email,
+            f"Xray access for {server.name}",
+            self._build_xray_delivery_text(service, server),
+        )
+        return f"Xray access sent to {target_email}"
 
     def send_test_email(self, db: Session) -> str:
         settings = self.settings.get_delivery_settings(db)

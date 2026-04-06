@@ -14,7 +14,7 @@ class EligibleServiceServerRead(BaseModel):
 class ExtraServiceCreate(BaseModel):
     service_type: str = "mtproxy"
     server_id: int
-    domain: str
+    domain: str | None = None
 
 
 class ExtraServiceDeliveryRequest(BaseModel):

@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import secrets
+import uuid
 from pathlib import Path
 from datetime import UTC, datetime, timedelta
 
@@ -55,6 +56,34 @@ def _build_mtproxy_fake_tls_secret(domain: str, secret: str | None = None) -> st
     padding_len = 30 - len(domain_hex)
     random_hex = secrets.token_hex(15)[:padding_len]
     return f"ee{domain_hex}{random_hex}"
+
+
+def _generate_socks5_username(existing: str | None = None) -> str:
+    raw = (existing or "").strip()
+    return raw or f"user{secrets.token_hex(4)}"
+
+
+def _generate_socks5_password(existing: str | None = None) -> str:
+    raw = (existing or "").strip()
+    return raw or secrets.token_urlsafe(12)
+
+
+def _build_xray_client_uri(
+    *,
+    host: str,
+    port: int,
+    uuid_value: str,
+    server_name: str,
+    public_key: str,
+    short_id: str,
+    remark: str,
+) -> str:
+    return (
+        f"vless://{uuid_value}@{host}:{port}"
+        f"?type=tcp&security=reality&encryption=none&flow=xtls-rprx-vision"
+        f"&sni={server_name}&fp=safari&pbk={public_key}&sid={short_id}"
+        f"#{remark}"
+    )
 
 
 def _extract_rendered_config_value(content: str, key: str) -> str | None:
@@ -304,6 +333,209 @@ echo status="$container_status"
         db.add(latest_job)
 
 
+def _sync_socks5_service(db: Session, service: ServiceInstance, server: Server) -> None:
+    creds = ServerCredentialsService()
+    ssh = SSHService()
+    config = json.loads(service.config_json) if service.config_json else {}
+    runtime = json.loads(service.runtime_details_json) if service.runtime_details_json else {}
+    port = int(config.get("port") or 1080)
+    container_name = str(runtime.get("container_name") or config.get("container_name") or f"awg-socks5-{service.id}")
+    image_name = str(runtime.get("image_name") or config.get("image_name") or "serjs/go-socks5-proxy:latest")
+    remote_dir = str(runtime.get("remote_dir") or config.get("remote_dir") or f"/opt/awg-extra-services/socks5-{service.id}")
+    command = wrap_with_optional_sudo(
+        f"""
+set -e
+if ! command -v docker >/dev/null 2>&1; then
+  echo status=missing
+  exit 0
+fi
+container_status="$(docker inspect -f '{{{{.State.Status}}}}' {container_name} 2>/dev/null || true)"
+if [ -z "${{container_status:-}}" ]; then
+  echo status=missing
+  exit 0
+fi
+echo status="$container_status"
+""".strip(),
+        creds.get_sudo_password(server),
+    )
+    result = asyncio.run(
+        ssh.run_command(
+            host=server.host,
+            username=server.ssh_user,
+            port=server.ssh_port,
+            password=creds.get_ssh_password(server),
+            private_key=creds.get_private_key(server),
+            command=command,
+            timeout_seconds=120,
+        )
+    )
+    if result.exit_status != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Unable to inspect SOCKS5 container")
+
+    remote_status = "unknown"
+    for line in result.stdout.splitlines():
+        if line.startswith("status="):
+            remote_status = line.split("=", maxsplit=1)[1].strip()
+            break
+
+    latest_job = _latest_install_job_for_service(db, service.id)
+
+    if remote_status == "running":
+        config.update(
+            {
+                "repo_url": "https://github.com/serjs/socks5-server",
+                "image_mode": "docker_socks5_auth",
+                "port": port,
+                "container_name": container_name,
+                "image_name": image_name,
+                "remote_dir": remote_dir,
+                "install_state": "installed",
+            }
+        )
+        service.status = "running"
+        service.public_endpoint = f"{server.host}:{port}"
+        service.config_json = json.dumps(config)
+        service.runtime_details_json = json.dumps(
+            {
+                "container_name": container_name,
+                "image_name": image_name,
+                "remote_dir": remote_dir,
+                "container_status": remote_status,
+            }
+        )
+        service.last_error = None
+        db.add(service)
+        if latest_job and latest_job.status in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.FAILED}:
+            latest_job.status = JobStatus.SUCCEEDED
+            latest_job.result_message = f"ExtraService:{service.id}|SOCKS5 confirmed running on {server.name}"
+            db.add(latest_job)
+        return
+
+    if remote_status in {"created", "restarting", "paused"}:
+        service.status = "installing"
+    elif remote_status in {"exited", "dead", "missing"}:
+        service.status = "error"
+        service.last_error = f"SOCKS5 container state: {remote_status}"
+    else:
+        service.status = remote_status
+    runtime.update(
+        {
+            "container_name": container_name,
+            "image_name": image_name,
+            "remote_dir": remote_dir,
+            "container_status": remote_status,
+        }
+    )
+    service.runtime_details_json = json.dumps(runtime)
+    db.add(service)
+    if latest_job and latest_job.status in {JobStatus.PENDING, JobStatus.RUNNING} and remote_status in {"exited", "dead", "missing"}:
+        latest_job.status = JobStatus.FAILED
+        latest_job.result_message = f"ExtraService:{service.id}|SOCKS5 container state: {remote_status}"
+        db.add(latest_job)
+
+
+def _sync_xray_service(db: Session, service: ServiceInstance, server: Server) -> None:
+    creds = ServerCredentialsService()
+    ssh = SSHService()
+    config = json.loads(service.config_json) if service.config_json else {}
+    runtime = json.loads(service.runtime_details_json) if service.runtime_details_json else {}
+    port = int(config.get("port") or 443)
+    container_name = str(runtime.get("container_name") or config.get("container_name") or f"awg-xray-{service.id}")
+    image_name = str(runtime.get("image_name") or config.get("image_name") or "ghcr.io/xtls/xray-core:latest")
+    remote_dir = str(runtime.get("remote_dir") or config.get("remote_dir") or f"/opt/awg-extra-services/xray-{service.id}")
+    command = wrap_with_optional_sudo(
+        f"""
+set -e
+if ! command -v docker >/dev/null 2>&1; then
+  echo status=missing
+  exit 0
+fi
+container_status="$(docker inspect -f '{{{{.State.Status}}}}' {container_name} 2>/dev/null || true)"
+if [ -z "${{container_status:-}}" ]; then
+  echo status=missing
+  exit 0
+fi
+echo status="$container_status"
+""".strip(),
+        creds.get_sudo_password(server),
+    )
+    result = asyncio.run(
+        ssh.run_command(
+            host=server.host,
+            username=server.ssh_user,
+            port=server.ssh_port,
+            password=creds.get_ssh_password(server),
+            private_key=creds.get_private_key(server),
+            command=command,
+            timeout_seconds=120,
+        )
+    )
+    if result.exit_status != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Unable to inspect Xray container")
+
+    remote_status = "unknown"
+    for line in result.stdout.splitlines():
+        if line.startswith("status="):
+            remote_status = line.split("=", maxsplit=1)[1].strip()
+            break
+
+    latest_job = _latest_install_job_for_service(db, service.id)
+
+    if remote_status == "running":
+        config.update(
+            {
+                "repo_url": "https://github.com/XTLS/Xray-core",
+                "image_mode": "docker_vless_reality",
+                "mode": "vless_reality",
+                "port": port,
+                "container_name": container_name,
+                "image_name": image_name,
+                "remote_dir": remote_dir,
+                "install_state": "installed",
+            }
+        )
+        service.status = "running"
+        service.public_endpoint = f"{server.host}:{port}"
+        service.config_json = json.dumps(config)
+        service.runtime_details_json = json.dumps(
+            {
+                "container_name": container_name,
+                "image_name": image_name,
+                "remote_dir": remote_dir,
+                "container_status": remote_status,
+            }
+        )
+        service.last_error = None
+        db.add(service)
+        if latest_job and latest_job.status in {JobStatus.PENDING, JobStatus.RUNNING, JobStatus.FAILED}:
+            latest_job.status = JobStatus.SUCCEEDED
+            latest_job.result_message = f"ExtraService:{service.id}|Xray confirmed running on {server.name}"
+            db.add(latest_job)
+        return
+
+    if remote_status in {"created", "restarting", "paused"}:
+        service.status = "installing"
+    elif remote_status in {"exited", "dead", "missing"}:
+        service.status = "error"
+        service.last_error = f"Xray container state: {remote_status}"
+    else:
+        service.status = remote_status
+    runtime.update(
+        {
+            "container_name": container_name,
+            "image_name": image_name,
+            "remote_dir": remote_dir,
+            "container_status": remote_status,
+        }
+    )
+    service.runtime_details_json = json.dumps(runtime)
+    db.add(service)
+    if latest_job and latest_job.status in {JobStatus.PENDING, JobStatus.RUNNING} and remote_status in {"exited", "dead", "missing"}:
+        latest_job.status = JobStatus.FAILED
+        latest_job.result_message = f"ExtraService:{service.id}|Xray container state: {remote_status}"
+        db.add(latest_job)
+
+
 @celery_app.task(name="app.workers.tasks.install_extra_service")
 def install_extra_service(job_id: int) -> None:
     db, job, service, server = _load_job_service_and_server(job_id)
@@ -320,14 +552,39 @@ def install_extra_service(job_id: int) -> None:
         creds = ServerCredentialsService()
         ssh = SSHService()
         config = json.loads(service.config_json) if service.config_json else {}
-        port = int(config.get("port") or 443)
-        stats_port = int(config.get("stats_port") or 8888)
-        domain = str(config.get("domain") or "").strip()
-        secret = _build_mtproxy_fake_tls_secret(domain, str(config.get("secret") or ""))
-        remote_dir = f"/opt/awg-extra-services/mtproxy-{service.id}"
-        container_name = f"awg-mtproxy-{service.id}"
-        image_name = "telegrammessenger/proxy:latest"
-        tg_url = f"tg://proxy?server={server.host}&port={port}&secret={secret}"
+        if service.service_type == "mtproxy":
+            port = int(config.get("port") or 443)
+            stats_port = int(config.get("stats_port") or 8888)
+            domain = str(config.get("domain") or "").strip()
+            secret = _build_mtproxy_fake_tls_secret(domain, str(config.get("secret") or ""))
+            remote_dir = f"/opt/awg-extra-services/mtproxy-{service.id}"
+            container_name = f"awg-mtproxy-{service.id}"
+            image_name = "telegrammessenger/proxy:latest"
+            tg_url = f"tg://proxy?server={server.host}&port={port}&secret={secret}"
+        elif service.service_type == "socks5":
+            port = int(config.get("port") or 1080)
+            stats_port = 0
+            domain = ""
+            secret = ""
+            remote_dir = f"/opt/awg-extra-services/socks5-{service.id}"
+            container_name = f"awg-socks5-{service.id}"
+            image_name = "serjs/go-socks5-proxy:latest"
+            tg_url = ""
+            username = _generate_socks5_username(str(config.get("username") or ""))
+            password = _generate_socks5_password(str(config.get("password") or ""))
+        elif service.service_type == "xray":
+            port = int(config.get("port") or 443)
+            stats_port = 0
+            domain = str(config.get("server_name") or "").strip()
+            secret = ""
+            remote_dir = f"/opt/awg-extra-services/xray-{service.id}"
+            container_name = f"awg-xray-{service.id}"
+            image_name = "ghcr.io/xtls/xray-core:latest"
+            tg_url = ""
+            uuid_value = str(config.get("uuid") or uuid.uuid4())
+            short_id = str(config.get("short_id") or secrets.token_hex(4))
+        else:
+            raise RuntimeError(f"Unsupported extra service type: {service.service_type}")
 
         prep_command = wrap_with_optional_sudo(
             f"""
@@ -361,10 +618,11 @@ docker rm -f {container_name} >/dev/null 2>&1 || true
             )
         )
         if prep_result.exit_status != 0:
-            raise RuntimeError(prep_result.stderr.strip() or prep_result.stdout.strip() or "MTProxy prepare failed")
+            raise RuntimeError(prep_result.stderr.strip() or prep_result.stdout.strip() or f"{service.service_type} prepare failed")
 
         install_command = wrap_with_optional_sudo(
-            f"""
+            (
+                f"""
 set -e
 docker rm -f {container_name} >/dev/null 2>&1 || true
 docker pull {image_name}
@@ -375,7 +633,90 @@ docker run -d \
   -e SECRET={secret} \
   {image_name}
 docker ps --filter name={container_name} --format '{{{{.Names}}}}'
-""".strip(),
+""".strip()
+                if service.service_type == "mtproxy"
+                else f"""
+set -e
+docker rm -f {container_name} >/dev/null 2>&1 || true
+docker pull {image_name}
+docker run -d \
+  --name {container_name} \
+  --restart unless-stopped \
+  -p {port}:1080/tcp \
+  -e PROXY_PORT=1080 \
+  -e PROXY_USER="{username}" \
+  -e PROXY_PASSWORD="{password}" \
+  {image_name}
+docker ps --filter name={container_name} --format '{{{{.Names}}}}'
+""".strip()
+                if service.service_type == "socks5"
+                else f"""
+set -e
+docker rm -f {container_name} >/dev/null 2>&1 || true
+docker pull {image_name}
+mkdir -p {remote_dir}
+key_output="$(docker run --rm {image_name} x25519 2>/dev/null || true)"
+private_key="$(printf '%s\n' "$key_output" | awk -F': ' '/Private key/ {{print $2}}' | head -n1)"
+if [ -z "$private_key" ]; then
+  private_key="$(printf '%s\n' "$key_output" | awk -F': ' '/PrivateKey/ {{print $2}}' | head -n1)"
+fi
+public_key="$(printf '%s\n' "$key_output" | awk -F': ' '/Public key/ {{print $2}}' | head -n1)"
+if [ -z "$public_key" ]; then
+  public_key="$(printf '%s\n' "$key_output" | awk -F': ' '/Password \\(PublicKey\\)/ {{print $2}}' | head -n1)"
+fi
+if [ -z "$private_key" ] || [ -z "$public_key" ]; then
+  echo "Unable to generate x25519 keypair" >&2
+  exit 1
+fi
+cat > {remote_dir}/config.json <<'EOF'
+{{
+  "log": {{
+    "loglevel": "warning"
+  }},
+  "inbounds": [
+    {{
+      "port": {port},
+      "protocol": "vless",
+      "settings": {{
+        "clients": [
+          {{
+            "id": "{uuid_value}",
+            "flow": "xtls-rprx-vision"
+          }}
+        ],
+        "decryption": "none"
+      }},
+      "streamSettings": {{
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {{
+          "show": false,
+          "dest": "{domain}:443",
+          "serverNames": ["{domain}"],
+          "privateKey": "__PRIVATE_KEY__",
+          "shortIds": ["{short_id}"]
+        }}
+      }}
+    }}
+  ],
+  "outbounds": [
+    {{
+      "protocol": "freedom"
+    }}
+  ]
+}}
+EOF
+sed -i "s#__PRIVATE_KEY__#$private_key#g" {remote_dir}/config.json
+docker run -d \
+  --name {container_name} \
+  --restart unless-stopped \
+  -p {port}:{port}/tcp \
+  -v {remote_dir}/config.json:/usr/local/etc/xray/config.json:ro \
+  {image_name} run -c /usr/local/etc/xray/config.json
+docker ps --filter name={container_name} --format '{{{{.Names}}}}'
+printf '\nXRAY_PUBLIC_KEY=%s\n' "$public_key"
+""".strip()
+            ),
             creds.get_sudo_password(server),
         )
         install_result = asyncio.run(
@@ -390,22 +731,74 @@ docker ps --filter name={container_name} --format '{{{{.Names}}}}'
             )
         )
         if install_result.exit_status != 0:
-            raise RuntimeError(install_result.stderr.strip() or install_result.stdout.strip() or "MTProxy install failed")
+            raise RuntimeError(install_result.stderr.strip() or install_result.stdout.strip() or f"{service.service_type} install failed")
 
-        config.update(
-            {
-                "repo_url": "https://github.com/TelegramMessenger/MTProxy",
-                "image_mode": "official_docker_fake_tls",
-                "port": port,
-                "domain": domain or None,
-                "secret": secret,
-                "tg_url": tg_url,
-                "remote_dir": remote_dir,
-                "container_name": container_name,
-                "image_name": image_name,
-                "install_state": "installed",
-            }
-        )
+        if service.service_type == "mtproxy":
+            config.update(
+                {
+                    "repo_url": "https://github.com/TelegramMessenger/MTProxy",
+                    "image_mode": "official_docker_fake_tls",
+                    "port": port,
+                    "domain": domain or None,
+                    "secret": secret,
+                    "tg_url": tg_url,
+                    "remote_dir": remote_dir,
+                    "container_name": container_name,
+                    "image_name": image_name,
+                    "install_state": "installed",
+                }
+            )
+            success_message = f"ExtraService:{service.id}|MTProxy installed on {server.name}"
+        elif service.service_type == "socks5":
+            config.update(
+                {
+                    "repo_url": "https://github.com/serjs/socks5-server",
+                    "image_mode": "docker_socks5_auth",
+                    "port": port,
+                    "username": username,
+                    "password": password,
+                    "remote_dir": remote_dir,
+                    "container_name": container_name,
+                    "image_name": image_name,
+                    "install_state": "installed",
+                }
+            )
+            success_message = f"ExtraService:{service.id}|SOCKS5 installed on {server.name}"
+        else:
+            public_key = ""
+            for line in install_result.stdout.splitlines():
+                if line.startswith("XRAY_PUBLIC_KEY="):
+                    public_key = line.split("=", maxsplit=1)[1].strip()
+                    break
+            if not public_key:
+                raise RuntimeError("Xray public key was not returned by installer")
+            client_uri = _build_xray_client_uri(
+                host=server.host,
+                port=port,
+                uuid_value=uuid_value,
+                server_name=domain,
+                public_key=public_key,
+                short_id=short_id,
+                remark=f"{server.name}-Reality",
+            )
+            config.update(
+                {
+                    "repo_url": "https://github.com/XTLS/Xray-core",
+                    "image_mode": "docker_vless_reality",
+                    "mode": "vless_reality",
+                    "port": port,
+                    "server_name": domain,
+                    "uuid": uuid_value,
+                    "public_key": public_key,
+                    "short_id": short_id,
+                    "client_uri": client_uri,
+                    "remote_dir": remote_dir,
+                    "container_name": container_name,
+                    "image_name": image_name,
+                    "install_state": "installed",
+                }
+            )
+            success_message = f"ExtraService:{service.id}|Xray installed on {server.name}"
         service.status = "running"
         service.public_endpoint = f"{server.host}:{port}"
         service.config_json = json.dumps(config)
@@ -419,7 +812,7 @@ docker ps --filter name={container_name} --format '{{{{.Names}}}}'
         )
         service.last_error = None
         job.status = JobStatus.SUCCEEDED
-        job.result_message = f"ExtraService:{service.id}|MTProxy installed on {server.name}"
+        job.result_message = success_message
         db.add_all([job, service])
         db.commit()
     except Exception as exc:  # noqa: BLE001
@@ -957,13 +1350,18 @@ def sync_server_runtime_metrics() -> None:
 def sync_extra_service_runtime() -> None:
     db: Session = SessionLocal()
     try:
-        services = db.query(ServiceInstance).filter(ServiceInstance.service_type == "mtproxy").all()
+        services = db.query(ServiceInstance).filter(ServiceInstance.service_type.in_(["mtproxy", "socks5", "xray"])).all()
         for service in services:
             server = db.query(Server).filter(Server.id == service.server_id).first()
             if not server:
                 continue
             try:
-                _sync_mtproxy_service(db, service, server)
+                if service.service_type == "mtproxy":
+                    _sync_mtproxy_service(db, service, server)
+                elif service.service_type == "socks5":
+                    _sync_socks5_service(db, service, server)
+                else:
+                    _sync_xray_service(db, service, server)
                 db.commit()
             except Exception as exc:  # noqa: BLE001
                 db.rollback()
