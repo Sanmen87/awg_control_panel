@@ -99,6 +99,49 @@
 - `Delivery methods` label replaces `Integrations`.
 - Logout moved out of sidebar into the content topbar.
 
+### Backups
+
+- `full bundle` is now the main backup format.
+- Bundle backup includes:
+  - panel PostgreSQL dump
+  - server runtime/config snapshots when available
+  - unified `manifest.json`
+- Backup storage path is configured through `BACKUP_STORAGE_PATH`.
+- Automatic backup retention and cleanup are supported.
+- Uploaded bundles are handled separately in the UI.
+- Manual bundle-oriented restore flow is available for:
+  - panel restore
+  - selected server restore
+
+### Extra Services
+
+- Separate main-menu section: `Extra services`.
+- Eligible install targets:
+  - exit nodes of proxy topologies
+  - standalone standard servers
+- Implemented services:
+  - `MTProxy`
+  - `SOCKS5`
+  - `Xray / VLESS + Reality`
+- `MTProxy` practical mode:
+  - `telegrammessenger/proxy`
+  - Fake TLS `ee...` secret
+  - short domain up to 15 bytes
+  - install / refresh status / delete from server / email delivery
+- `SOCKS5`:
+  - docker-based install
+  - generated username / password
+  - refresh status / delete from server / email delivery
+- `Xray / VLESS + Reality`:
+  - docker-based install
+  - generated `UUID`, `shortId`, and `x25519` keypair
+  - ready-to-import `vless://` client link
+  - currently validated as a practical iPhone-friendly path
+- Install UI for extra services is now card-based with:
+  - aligned install actions
+  - shared card layout
+  - copy-to-clipboard in MTProxy and Xray connection blocks
+
 ## In Progress
 
 ### Notifications
@@ -159,6 +202,14 @@
 - Add an automatic cleanup/migration path for existing broken `proxy + 1 exit` deployments where service peer was previously written into proxy `awg0`.
 - Add end-to-end verification that a managed client created on proxy really exits with the selected exit node public IP.
 
+### Per-Server Agent
+
+- Design an agent which is installed automatically together with AWG on every managed server.
+- Let the agent continue traffic accounting when the central panel is offline.
+- Let the agent execute server-local panel tasks while the panel is unavailable.
+- Add deferred synchronization so the agent can push counters, task results, and local state back to the panel after reconnect.
+- Define conflict-resolution rules for offline-collected counters and server-side task results.
+
 ## Later
 
 ### Server Install Defects
@@ -180,22 +231,6 @@
 - Build a reconcile-based speed-policy service instead of ad-hoc shell commands.
 - Use client `assigned_ip` as the stable shaping match key.
 - Add UI controls for speed policy in the client settings modal.
-
-### Backups
-
-- Implement full backups of AWG server state:
-  - `wg0.conf`
-  - `clientsTable`
-  - peers
-  - live config metadata
-- Implement panel backups:
-  - PostgreSQL
-  - generated client materials
-  - backup storage inventory
-- Add restore workflows for:
-  - panel restore
-  - server restore
-  - fast redeploy / disaster recovery
 
 ### Web Exposure And Hardening
 

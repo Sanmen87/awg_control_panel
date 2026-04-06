@@ -7,7 +7,7 @@
 - PostgreSQL for core state
 - Redis and Celery for background jobs
 - nginx as reverse proxy
-- future Dockerized proxy agent for failover logic
+- future per-server agent for offline accounting, local task execution, and deferred sync
 
 ## Initial domain entities
 
@@ -18,6 +18,7 @@
 - `User`
 - `DeploymentJob`
 - `BackupJob`
+- `ServiceInstance`
 - `FailoverEvent`
 - `AuditLog`
 
@@ -28,3 +29,4 @@ Future iterations will add:
 - topology deployment renderer
 - backup archive inventory
 - agent heartbeat and health snapshots
+- offline task journal between panel and per-server agent
