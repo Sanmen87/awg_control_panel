@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
+from app.models.agent_node import AgentNode
 from app.models.client import Client
 from app.models.job import DeploymentJob, JobStatus, JobType
 from app.models.server import AWGStatus, AccessStatus, InstallMethod, Server, ServerStatus
@@ -25,6 +26,7 @@ from app.services.server_geo import ServerGeoService
 from app.services.server_credentials import ServerCredentialsService
 from app.services.ssh import SSHService
 from app.services.standard_config_inspector import StandardConfigInspector
+from app.services.server_agent import ServerAgentService
 from app.services.topology_deployer import TopologyDeployer
 from app.services.topology_renderer import RenderedConfig
 
@@ -58,9 +60,56 @@ def _hydrate_server_readiness(
     setattr(server, "ready_for_managed_clients", _is_server_ready_for_managed_clients(server, topology_by_id, nodes_by_server_id))
 
 
+def _merge_agent_metadata(server: Server, agent: AgentNode | None) -> None:
+    try:
+        metadata = json.loads(server.metadata_json) if server.metadata_json else {}
+    except json.JSONDecodeError:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if agent is None:
+        metadata.pop("panel_agent", None)
+    else:
+        local_state: dict[str, object] = {}
+        try:
+            parsed_local_state = json.loads(agent.local_state_json) if agent.local_state_json else {}
+            if isinstance(parsed_local_state, dict):
+                local_state = parsed_local_state
+        except json.JSONDecodeError:
+            local_state = {}
+        metadata["panel_agent"] = {
+            "status": agent.status,
+            "version": agent.version,
+            "last_seen_at": agent.last_seen_at.isoformat() if agent.last_seen_at else None,
+            "last_sync_at": agent.last_sync_at.isoformat() if agent.last_sync_at else None,
+            "last_error": agent.last_error,
+            "sync_enabled": bool(local_state.get("sync_enabled")),
+            "pending_local_tasks": int(local_state.get("pending_local_tasks") or 0),
+            "pending_local_results": int(local_state.get("pending_local_results") or 0),
+        }
+    server.metadata_json = json.dumps(metadata, ensure_ascii=False)
+
+
+def _inspect_standard_with_agent_if_available(db: Session, server: Server) -> object | None:
+    agent = db.query(AgentNode).filter(AgentNode.server_id == server.id).first()
+    if agent is None:
+        return None
+    try:
+        payload = asyncio.run(ServerAgentService().run_local_task(server, "inspect-standard-runtime", None, timeout_seconds=35.0))
+    except Exception:
+        return None
+    if not payload or str(payload.get("status") or "") != "succeeded":
+        return None
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    return StandardConfigInspector().build_from_agent_payload(result)
+
+
 @router.get("", response_model=list[ServerRead])
 def list_servers(db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> list[Server]:
     servers = db.query(Server).order_by(Server.created_at.desc()).all()
+    agents_by_server_id = {agent.server_id: agent for agent in db.query(AgentNode).all()}
     nodes = db.query(TopologyNode).all()
     topologies = {item.id: item for item in db.query(Topology).all()}
     topology_name_by_server: dict[int, str] = {}
@@ -89,6 +138,8 @@ def list_servers(db: Session = Depends(get_db), _: User = Depends(get_current_us
         db.commit()
         for server in servers:
             db.refresh(server)
+    for server in servers:
+        _merge_agent_metadata(server, agents_by_server_id.get(server.id))
     return servers
 
 
@@ -416,7 +467,9 @@ def inspect_standard_server(
     if not server.awg_detected:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="AWG must be detected before importing live config")
 
-    inspection = asyncio.run(StandardConfigInspector().inspect(server))
+    inspection = _inspect_standard_with_agent_if_available(db, server)
+    if inspection is None:
+        inspection = asyncio.run(StandardConfigInspector().inspect(server))
     server.config_source = "imported" if inspection.interface or inspection.listen_port or inspection.peer_count else "generated"
     server.live_interface_name = inspection.interface
     server.live_config_path = inspection.config_path or (
@@ -527,7 +580,9 @@ def prepare_server(
 
         if parsed.detected:
             try:
-                inspection = asyncio.run(StandardConfigInspector().inspect(server))
+                inspection = _inspect_standard_with_agent_if_available(db, server)
+                if inspection is None:
+                    inspection = asyncio.run(StandardConfigInspector().inspect(server))
                 server.config_source = "imported" if inspection.interface or inspection.listen_port or inspection.peer_count else "generated"
                 server.live_interface_name = inspection.interface
                 server.live_config_path = inspection.config_path or (

@@ -454,6 +454,40 @@ class StandardConfigInspector:
             merged.append(candidate)
         return merged
 
+    def build_from_agent_payload(self, payload: dict[str, object]) -> StandardConfigInspection:
+        runtime = str(payload.get("runtime") or "unknown")
+        config_text = str(payload.get("config_preview") or "")
+        clients_table = str(payload.get("clients_table_preview") or "")
+        peer_dump = str(payload.get("awg_dump") or "")
+        peers = self._parse_peer_dump(peer_dump)
+        if not peers and config_text:
+            peers = self._parse_peers_from_config(config_text)
+        peers = self._merge_clients_table(peers, clients_table)
+
+        peer_count_raw = str(payload.get("peer_count") or "0")
+        peer_count = int(peer_count_raw) if peer_count_raw.isdigit() else 0
+        if peer_count == 0 and peers:
+            peer_count = len(peers)
+
+        normalized_payload = dict(payload)
+        normalized_payload["config_preview"] = config_text
+        normalized_payload["clients_table_preview"] = clients_table
+        normalized_payload["peers"] = peers
+        normalized_payload["peer_count"] = str(peer_count)
+
+        listen_port_raw = str(payload.get("listen_port") or "")
+        return StandardConfigInspection(
+            runtime=runtime,
+            interface=str(payload.get("interface") or "") or None,
+            listen_port=int(listen_port_raw) if listen_port_raw.isdigit() else None,
+            address_cidr=str(payload.get("address_cidr") or "") or None,
+            peer_count=peer_count,
+            config_path=str(payload.get("config_path") or "") or None,
+            docker_container=str(payload.get("docker_container") or "") or None,
+            docker_mounts=str(payload.get("docker_mounts") or "") or None,
+            raw_json=json.dumps(normalized_payload),
+        )
+
     async def inspect(self, server: Server) -> StandardConfigInspection:
         result = await self.ssh.run_command(
             host=server.host,

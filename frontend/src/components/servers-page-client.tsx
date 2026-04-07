@@ -64,6 +64,16 @@ type ServerMetadata = {
     last_switch_reason?: string | null;
     last_error?: string | null;
   };
+  panel_agent?: {
+    status?: string;
+    version?: string | null;
+    last_seen_at?: string | null;
+    last_sync_at?: string | null;
+    last_error?: string | null;
+    sync_enabled?: boolean;
+    pending_local_tasks?: number;
+    pending_local_results?: number;
+  };
 };
 
 type Job = {
@@ -104,6 +114,8 @@ export function ServersPageClient() {
   const [loading, setLoading] = useState(false);
   const [workingServerId, setWorkingServerId] = useState<number | null>(null);
   const [deletingServerId, setDeletingServerId] = useState<number | null>(null);
+  const [agentWorkingServerId, setAgentWorkingServerId] = useState<number | null>(null);
+  const [agentActionInfo, setAgentActionInfo] = useState<Record<number, string>>({});
 
   const copy = locale === "ru"
     ? {
@@ -154,6 +166,7 @@ export function ServersPageClient() {
           awg: "AWG",
           runtime: "Runtime",
           failoverAgent: "Failover agent",
+          panelAgent: "Панельный агент",
           activeExit: "Активный exit",
           backupPeers: "Peer-ов на backup",
           topology: "Topology",
@@ -162,8 +175,23 @@ export function ServersPageClient() {
           clients: "Клиентов",
           config: "Конфиг",
           diagnostics: "Диагностика",
-          notAssigned: "не добавлен"
+          notAssigned: "не добавлен",
+          agentSync: "Web sync",
+          agentQueue: "Локальная очередь",
+          agentResults: "Локальные результаты"
         }
+        ,
+        agentRefresh: "Проверить агента",
+        agentSyncResults: "Забрать результаты",
+        agentUnavailable: "не установлен",
+        agentInstall: "Установить агент",
+        agentReinstall: "Переустановить агент",
+        agentInstalling: "Установка агента...",
+        agentReinstalling: "Переустановка агента...",
+        agentInstalledOk: "Агент установлен и конфиг обновлён.",
+        agentReinstalledOk: "Агент переустановлен и конфиг обновлён.",
+        agentRefreshOk: "Статус агента обновлён.",
+        agentResultsOk: "Локальные результаты агента синхронизированы.",
       }
     : {
         title: "Prepare a server with one pipeline: SSH, AWG detection, live config import, and compact inventory.",
@@ -213,6 +241,7 @@ export function ServersPageClient() {
           awg: "AWG",
           runtime: "Runtime",
           failoverAgent: "Failover agent",
+          panelAgent: "Panel agent",
           activeExit: "Active exit",
           backupPeers: "Peers on backup",
           topology: "Topology",
@@ -221,8 +250,23 @@ export function ServersPageClient() {
           clients: "Clients",
           config: "Config",
           diagnostics: "Diagnostics",
-          notAssigned: "not assigned"
+          notAssigned: "not assigned",
+          agentSync: "Web sync",
+          agentQueue: "Local queue",
+          agentResults: "Local results"
         }
+        ,
+        agentRefresh: "Refresh agent",
+        agentSyncResults: "Fetch results",
+        agentUnavailable: "not installed",
+        agentInstall: "Install agent",
+        agentReinstall: "Reinstall agent",
+        agentInstalling: "Installing agent...",
+        agentReinstalling: "Reinstalling agent...",
+        agentInstalledOk: "Agent installed and config refreshed.",
+        agentReinstalledOk: "Agent reinstalled and config refreshed.",
+        agentRefreshOk: "Agent status refreshed.",
+        agentResultsOk: "Local agent results synchronized.",
       };
 
   async function loadServers() {
@@ -406,6 +450,114 @@ export function ServersPageClient() {
       return locale === "ru" ? "Автовозврат на основной exit" : "Automatic return to the primary exit";
     }
     return reason;
+  }
+
+  function panelAgentSummary(server: Server) {
+    const agent = parseMetadata(server)?.panel_agent;
+    if (!agent) {
+      return copy.agentUnavailable;
+    }
+    return agent.status || "unknown";
+  }
+
+  function shouldShowInstallAgent(server: Server) {
+    const agent = parseMetadata(server)?.panel_agent;
+    return !agent || agent.status === "enrolled";
+  }
+
+  async function installAgent(serverId: number) {
+    if (!token) {
+      return;
+    }
+    const targetServer = servers.find((item) => item.id === serverId);
+    const isReinstall = targetServer ? !shouldShowInstallAgent(targetServer) : false;
+    setAgentWorkingServerId(serverId);
+    setAgentActionInfo((current) => ({
+      ...current,
+      [serverId]: isReinstall ? copy.agentReinstalling : copy.agentInstalling
+    }));
+    try {
+      await apiRequest(`/agents/install/${serverId}`, {
+        method: "POST",
+        token
+      });
+      await loadServers();
+      setAgentActionInfo((current) => ({
+        ...current,
+        [serverId]: isReinstall ? copy.agentReinstalledOk : copy.agentInstalledOk
+      }));
+    } catch (nextError) {
+      const message = nextError instanceof Error ? nextError.message : "Failed to install agent";
+      setAgentActionInfo((current) => ({
+        ...current,
+        [serverId]: message
+      }));
+      setError(nextError instanceof Error ? nextError.message : "Failed to install agent");
+    } finally {
+      setAgentWorkingServerId(null);
+    }
+  }
+
+  async function refreshAgentStatus(serverId: number) {
+    if (!token) {
+      return;
+    }
+    setAgentWorkingServerId(serverId);
+    setAgentActionInfo((current) => ({
+      ...current,
+      [serverId]: copy.agentRefresh
+    }));
+    try {
+      await apiRequest(`/agents/${serverId}/local-status`, {
+        method: "GET",
+        token
+      });
+      await loadServers();
+      setAgentActionInfo((current) => ({
+        ...current,
+        [serverId]: copy.agentRefreshOk
+      }));
+    } catch (nextError) {
+      const message = nextError instanceof Error ? nextError.message : "Failed to refresh agent";
+      setAgentActionInfo((current) => ({
+        ...current,
+        [serverId]: message
+      }));
+      setError(nextError instanceof Error ? nextError.message : "Failed to refresh agent");
+    } finally {
+      setAgentWorkingServerId(null);
+    }
+  }
+
+  async function syncAgentResults(serverId: number) {
+    if (!token) {
+      return;
+    }
+    setAgentWorkingServerId(serverId);
+    setAgentActionInfo((current) => ({
+      ...current,
+      [serverId]: copy.agentSyncResults
+    }));
+    try {
+      await apiRequest(`/agents/${serverId}/sync-local-results`, {
+        method: "POST",
+        token
+      });
+      await loadServers();
+      setAgentActionInfo((current) => ({
+        ...current,
+        [serverId]: copy.agentResultsOk
+      }));
+    } catch (nextError) {
+      const message = nextError instanceof Error ? nextError.message : "Failed to sync agent results";
+      setAgentActionInfo((current) => ({
+        ...current,
+        [serverId]: message
+      }));
+      setError(nextError instanceof Error ? nextError.message : "Failed to sync agent results");
+    } finally {
+      setAgentWorkingServerId(null);
+    }
   }
 
   function latestServerJob(serverId: number, jobType?: string) {
@@ -685,6 +837,7 @@ export function ServersPageClient() {
                       <span>{copy.labels.awg}: {summaryAwg(server, details)}</span>
                       <span>{copy.labels.runtime}: {details?.docker_container ?? details?.runtime ?? "-"}</span>
                       <span>{copy.labels.failoverAgent}: {failoverAgentSummary(server)}</span>
+                      <span>{copy.labels.panelAgent}: {panelAgentSummary(server)}</span>
                       {failoverActiveExit(server) ? <span>{copy.labels.activeExit}: {failoverActiveExit(server)}</span> : null}
                       <span>{copy.labels.topology}: {server.topology_name ?? copy.labels.notAssigned}</span>
                       <span>{copy.labels.subnet}: {server.live_address_cidr ?? "-"}</span>
@@ -719,11 +872,77 @@ export function ServersPageClient() {
                       </div>
                     ) : null}
 
+                    {metadata?.panel_agent ? (
+                      <div className="server-failover-card">
+                        <div className="server-failover-head">
+                          <strong>{copy.labels.panelAgent}</strong>
+                          <span className={`status-badge ${
+                            metadata.panel_agent.status === "running" || metadata.panel_agent.status === "online"
+                              ? "status-succeeded"
+                              : metadata.panel_agent.status === "offline" || metadata.panel_agent.status === "error"
+                                ? "status-failed"
+                                : "status-pending"
+                          }`}>
+                            {panelAgentSummary(server)}
+                          </span>
+                        </div>
+                        <div className="server-meta">
+                          <span>{copy.labels.agentSync}: {metadata.panel_agent.sync_enabled ? "enabled" : "local-only"}</span>
+                          <span>{copy.labels.agentQueue}: {metadata.panel_agent.pending_local_tasks ?? 0}</span>
+                          <span>{copy.labels.agentResults}: {metadata.panel_agent.pending_local_results ?? 0}</span>
+                          {metadata.panel_agent.version ? <span>version: {metadata.panel_agent.version}</span> : null}
+                          {metadata.panel_agent.last_seen_at ? <span>last_seen: {metadata.panel_agent.last_seen_at}</span> : null}
+                          {metadata.panel_agent.last_sync_at ? <span>last_sync: {metadata.panel_agent.last_sync_at}</span> : null}
+                        </div>
+                        {metadata.panel_agent.last_error ? <div className="info-box">{metadata.panel_agent.last_error}</div> : null}
+                        {agentActionInfo[server.id] ? <div className="info-box">{agentActionInfo[server.id]}</div> : null}
+                        <div className="action-row compact-action-row">
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => void installAgent(server.id)}
+                            disabled={agentWorkingServerId === server.id}
+                          >
+                            {copy.agentReinstall}
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => void refreshAgentStatus(server.id)}
+                            disabled={agentWorkingServerId === server.id}
+                          >
+                            {copy.agentRefresh}
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => void syncAgentResults(server.id)}
+                            disabled={agentWorkingServerId === server.id}
+                          >
+                            {copy.agentSyncResults}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
                     {!isDebugMessage(server.last_error) && server.last_error ? (
                       <div className="error-box">{server.last_error}</div>
                     ) : null}
 
                     <div className="action-row">
+                      {!metadata?.panel_agent && agentActionInfo[server.id] ? (
+                        <div className="info-box">{agentActionInfo[server.id]}</div>
+                      ) : null}
+                      {shouldShowInstallAgent(server) ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => void installAgent(server.id)}
+                          disabled={agentWorkingServerId === server.id}
+                        >
+                          {copy.agentInstall}
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         className="primary-button"

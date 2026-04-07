@@ -9,6 +9,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.models.backup import BackupJob, BackupStatus, BackupType
+from app.models.agent_node import AgentNode
+from app.models.agent_task import AgentTask
 from app.models.client import Client
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -32,6 +34,7 @@ from app.services.panel_backup import PanelBackupService
 from app.services.panel_restore import PanelRestoreService
 from app.services.proxy_failover_agent import ProxyFailoverAgentService
 from app.services.server_backup import ServerBackupService
+from app.services.server_agent import ServerAgentService
 from app.services.server_credentials import ServerCredentialsService
 from app.services.server_restore import ServerRestoreService
 from app.services.clients_table import ClientsTableService
@@ -90,6 +93,97 @@ def _extract_rendered_config_value(content: str, key: str) -> str | None:
     pattern = rf"^{re.escape(key)}\s*=\s*(.+)$"
     match = re.search(pattern, content, re.MULTILINE)
     return match.group(1).strip() if match else None
+
+
+def _sync_panel_agent_from_local_status(agent: AgentNode, payload: dict[str, object] | None) -> bool:
+    if payload is None:
+        next_status = "offline"
+        next_error = "Local agent status file is unavailable"
+        changed = agent.status != next_status or agent.last_error != next_error
+        agent.status = next_status
+        agent.last_error = next_error
+        return changed
+
+    now = datetime.now(UTC)
+    local_state = payload.get("local_state")
+    capabilities = payload.get("capabilities")
+    next_local_state = json.dumps(local_state, ensure_ascii=False) if local_state is not None else None
+    next_capabilities = json.dumps(capabilities, ensure_ascii=False) if capabilities is not None else None
+    next_status = str(payload.get("status") or "online")
+    next_version = str(payload.get("version") or agent.version or "")
+    changed = any(
+        [
+            agent.status != next_status,
+            agent.version != next_version,
+            agent.local_state_json != next_local_state,
+            agent.capabilities_json != next_capabilities,
+            agent.last_error is not None,
+        ]
+    )
+    agent.status = next_status
+    agent.version = next_version
+    agent.local_state_json = next_local_state
+    agent.capabilities_json = next_capabilities
+    agent.last_seen_at = now
+    agent.last_sync_at = now
+    agent.last_error = None
+    return changed
+
+
+def _ensure_local_agent_task(db: Session, server: Server, agent: AgentNode, task_type: str) -> AgentTask | None:
+    existing = (
+        db.query(AgentTask)
+        .filter(
+            AgentTask.agent_id == agent.id,
+            AgentTask.server_id == server.id,
+            AgentTask.task_type == task_type,
+            AgentTask.status.in_(["pending", "running"]),
+        )
+        .order_by(AgentTask.created_at.asc(), AgentTask.id.asc())
+        .first()
+    )
+    if existing:
+        return None
+    task = AgentTask(
+        agent_id=agent.id,
+        server_id=server.id,
+        task_type=task_type,
+        status="pending",
+        payload_json=None,
+        requested_by_user_id=None,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def _consume_completed_agent_task(
+    db: Session,
+    agent: AgentNode,
+    server: Server,
+    task_type: str,
+) -> tuple[AgentTask | None, dict[str, object] | None]:
+    task = (
+        db.query(AgentTask)
+        .filter(
+            AgentTask.agent_id == agent.id,
+            AgentTask.server_id == server.id,
+            AgentTask.task_type == task_type,
+            AgentTask.status == "succeeded",
+        )
+        .order_by(AgentTask.completed_at.desc(), AgentTask.id.desc())
+        .first()
+    )
+    if task is None or not task.result_json:
+        return None, None
+    try:
+        payload = json.loads(task.result_json)
+    except json.JSONDecodeError:
+        payload = None
+    task.status = "consumed"
+    db.add(task)
+    return task, payload if isinstance(payload, dict) else None
 
 
 def _persist_generated_standard_server_state(db: Session, topology: Topology | None, rendered_files: list) -> None:
@@ -896,6 +990,9 @@ def bootstrap_server(job_id: int) -> None:
                 except Exception:
                     # Bootstrap should still succeed if live config inspection is temporarily unavailable.
                     pass
+                agent_service = ServerAgentService()
+                agent = agent_service.ensure_enrolled(db, server)
+                asyncio.run(agent_service.install(server, agent))
         else:
             job.status = JobStatus.FAILED
             job.result_message = result.stderr.strip() or result.stdout.strip() or "Bootstrap failed"
@@ -1287,6 +1384,7 @@ def sync_client_runtime_stats() -> None:
     db: Session = SessionLocal()
     service = ClientsTableService()
     client_sync = ClientSyncService()
+    server_agent = ServerAgentService()
     try:
         servers = (
             db.query(Server)
@@ -1299,6 +1397,87 @@ def sync_client_runtime_stats() -> None:
         for server in servers:
             clients = db.query(Client).filter(Client.server_id == server.id, Client.archived.is_(False)).all()
             if not clients:
+                continue
+            agent = db.query(AgentNode).filter(AgentNode.server_id == server.id).first()
+            processed_from_agent = False
+            existing_clients_table = ""
+            if agent is not None:
+                if agent.status != "offline":
+                    try:
+                        policy_snapshot = service.render_policy_snapshot(server, clients)
+                        asyncio.run(server_agent.sync_policy_snapshot(server, policy_snapshot))
+                        asyncio.run(
+                            server_agent.enqueue_local_task(
+                                server,
+                                "policy-enforcer",
+                                "enforce-client-policies",
+                                {"repeat": True, "silent": True},
+                            )
+                        )
+                    except Exception:
+                        pass
+
+                try:
+                    policy_state = asyncio.run(server_agent.fetch_policy_state(server))
+                except Exception:
+                    policy_state = None
+                if isinstance(policy_state, dict):
+                    service_updated, _ = service.sync_db_runtime_stats_from_agent_policy_state(db, server, policy_state)
+                    if service_updated:
+                        db.commit()
+                    else:
+                        db.rollback()
+                    processed_from_agent = True
+
+                _, clients_table_payload = _consume_completed_agent_task(db, agent, server, "read-clients-table")
+                if clients_table_payload:
+                    existing_clients_table = str(clients_table_payload.get("content") or "").strip()
+
+                _, traffic_payload = _consume_completed_agent_task(db, agent, server, "collect-traffic-counters")
+                if traffic_payload:
+                    awg_dump = str(traffic_payload.get("awg_dump") or "").strip()
+                    if awg_dump:
+                        if existing_clients_table:
+                            merged_clients_table = asyncio.run(service.merge_runtime_stats(server, existing_clients_table))
+                            if merged_clients_table != existing_clients_table:
+                                asyncio.run(service.upload(server, merged_clients_table))
+                        service_updated, should_apply_server_clients = service.sync_db_runtime_stats_from_dump(db, server, awg_dump)
+                        if service_updated or should_apply_server_clients:
+                            db.commit()
+                            if should_apply_server_clients:
+                                client_sync.apply_server_clients(db, server)
+                            db.commit()
+                        else:
+                            db.rollback()
+                        processed_from_agent = True
+
+                for task_type in ("read-clients-table", "collect-traffic-counters"):
+                    pending_task = (
+                        db.query(AgentTask)
+                        .filter(
+                            AgentTask.agent_id == agent.id,
+                            AgentTask.server_id == server.id,
+                            AgentTask.task_type == task_type,
+                            AgentTask.status.in_(["pending", "running"]),
+                        )
+                        .order_by(AgentTask.created_at.asc(), AgentTask.id.asc())
+                        .first()
+                    )
+                    if pending_task is None and agent.status != "offline":
+                        task = AgentTask(
+                            agent_id=agent.id,
+                            server_id=server.id,
+                            task_type=task_type,
+                            status="pending",
+                            payload_json=None,
+                            requested_by_user_id=None,
+                        )
+                        db.add(task)
+                        db.commit()
+                        db.refresh(task)
+                        asyncio.run(server_agent.enqueue_local_task(server, str(task.id), task.task_type, None))
+
+            if processed_from_agent:
                 continue
             existing_clients_table = asyncio.run(service.fetch_existing(server))
             if existing_clients_table:
@@ -1324,14 +1503,81 @@ def sync_server_runtime_metrics() -> None:
     db: Session = SessionLocal()
     service = ServerMetricsService()
     failover_agent = ProxyFailoverAgentService()
+    server_agent = ServerAgentService()
     try:
         servers = db.query(Server).filter(Server.access_status == AccessStatus.OK).all()
         for server in servers:
             try:
-                updated = asyncio.run(service.sync_server(db, server))
+                updated = False
+                agent_changed = False
+                queued_local_task = False
+                agent = db.query(AgentNode).filter(AgentNode.server_id == server.id).first()
+                if agent is not None:
+                    status_payload = None
+                    try:
+                        status_payload = asyncio.run(server_agent.fetch_local_status(server))
+                    except Exception as exc:  # noqa: BLE001
+                        agent.status = "offline"
+                        agent.last_error = str(exc)
+                        db.add(agent)
+                        agent_changed = True
+                    else:
+                        agent_changed = _sync_panel_agent_from_local_status(agent, status_payload) or agent_changed
+                        db.add(agent)
+
+                    try:
+                        results = asyncio.run(server_agent.fetch_local_results(server))
+                    except Exception as exc:  # noqa: BLE001
+                        agent.last_error = str(exc)
+                        db.add(agent)
+                        agent_changed = True
+                        results = []
+
+                    if results:
+                        now = datetime.now(UTC)
+                        for item in results:
+                            task_id_raw = item.get("id")
+                            if task_id_raw is None:
+                                continue
+                            try:
+                                task_id = int(task_id_raw)
+                            except (TypeError, ValueError):
+                                continue
+                            task = (
+                                db.query(AgentTask)
+                                .filter(AgentTask.id == task_id, AgentTask.agent_id == agent.id)
+                                .first()
+                            )
+                            if task is None:
+                                continue
+                            task.status = str(item.get("status") or task.status)
+                            result_payload = item.get("result")
+                            task.result_json = json.dumps(result_payload, ensure_ascii=False) if result_payload is not None else task.result_json
+                            task.last_error = str(item.get("last_error")) if item.get("last_error") else None
+                            task.completed_at = now if task.status in {"succeeded", "failed"} else task.completed_at
+                            db.add(task)
+                            if (
+                                task.task_type == "collect-runtime-snapshot"
+                                and task.status == "succeeded"
+                                and isinstance(result_payload, dict)
+                            ):
+                                updated = service.sync_server_from_agent_payload(db, server, result_payload) or updated
+                        agent.last_sync_at = now
+                        db.add(agent)
+                        agent_changed = True
+
+                    if agent.status != "offline":
+                        local_task = _ensure_local_agent_task(db, server, agent, "collect-runtime-snapshot")
+                        if local_task is not None:
+                            asyncio.run(server_agent.enqueue_local_task(server, str(local_task.id), local_task.task_type, None))
+                            queued_local_task = True
+
+                if agent is None or (not updated and agent is not None and agent.status == "offline"):
+                    updated = asyncio.run(service.sync_server(db, server)) or updated
+
                 status_payload = asyncio.run(failover_agent.fetch_status(server))
                 status_updated = failover_agent.sync_status_to_db(db, server, status_payload)
-                if updated or status_updated:
+                if updated or status_updated or agent_changed or queued_local_task:
                     db.commit()
                 else:
                     db.rollback()

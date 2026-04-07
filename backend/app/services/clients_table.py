@@ -59,6 +59,37 @@ class ClientsTableService:
             )
         return json.dumps(payload, ensure_ascii=False, indent=4)
 
+    def render_policy_snapshot(self, server: Server, clients: list[Client]) -> str:
+        runtime_details = parse_runtime_details(server)
+        payload = {
+            "version": 1,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "server_id": server.id,
+            "runtime": {
+                "runtime": server.runtime_flavor or runtime_details.get("runtime") or "",
+                "interface_name": server.live_interface_name or runtime_details.get("interface") or "awg0",
+                "config_path": server.live_config_path or runtime_details.get("config_path") or "",
+                "docker_container": get_docker_container(server, runtime_details) or "",
+            },
+            "clients": [
+                {
+                    "id": client.id,
+                    "name": client.name,
+                    "public_key": client.public_key,
+                    "assigned_ip": client.assigned_ip,
+                    "manual_disabled": client.manual_disabled,
+                    "expires_at": client.expires_at.isoformat() if client.expires_at else None,
+                    "quiet_hours_start_minute": client.quiet_hours_start_minute,
+                    "quiet_hours_end_minute": client.quiet_hours_end_minute,
+                    "quiet_hours_timezone": client.quiet_hours_timezone,
+                    "traffic_limit_mb": client.traffic_limit_mb,
+                }
+                for client in clients
+                if client.public_key and client.assigned_ip and not client.archived
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
     async def fetch_existing(self, server: Server) -> str:
         runtime_details = parse_runtime_details(server)
         command = build_read_clients_table_command(server, runtime_details)
@@ -114,6 +145,17 @@ class ClientsTableService:
 
     async def sync_db_runtime_stats(self, db: Session, server: Server) -> tuple[int, bool]:
         stats_by_public_key = await self._fetch_runtime_stats(server)
+        return self.sync_db_runtime_stats_from_parsed_stats(db, server, stats_by_public_key)
+
+    def sync_db_runtime_stats_from_dump(self, db: Session, server: Server, output: str) -> tuple[int, bool]:
+        return self.sync_db_runtime_stats_from_parsed_stats(db, server, self._parse_show_dump_output(output))
+
+    def sync_db_runtime_stats_from_parsed_stats(
+        self,
+        db: Session,
+        server: Server,
+        stats_by_public_key: dict[str, dict[str, str | int]],
+    ) -> tuple[int, bool]:
         refreshed_at = datetime.now(UTC)
         rolling_cutoff = refreshed_at - timedelta(days=30)
         clients = db.query(Client).filter(Client.server_id == server.id, Client.archived.is_(False)).all()
@@ -231,6 +273,113 @@ class ClientsTableService:
 
         self._prune_old_samples(db, refreshed_at - timedelta(days=45), server.id)
         return updated_count, should_apply_server_clients
+
+    def sync_db_runtime_stats_from_agent_policy_state(
+        self,
+        db: Session,
+        server: Server,
+        payload: dict[str, object],
+    ) -> tuple[int, bool]:
+        collected_at_raw = payload.get("collected_at")
+        try:
+            refreshed_at = datetime.fromisoformat(str(collected_at_raw)) if collected_at_raw else datetime.now(UTC)
+        except ValueError:
+            refreshed_at = datetime.now(UTC)
+        if refreshed_at.tzinfo is None:
+            refreshed_at = refreshed_at.replace(tzinfo=UTC)
+
+        clients_payload = payload.get("clients")
+        if not isinstance(clients_payload, dict):
+            return 0, False
+
+        updated_count = 0
+        clients = db.query(Client).filter(Client.server_id == server.id, Client.archived.is_(False)).all()
+        for client in clients:
+            state = clients_payload.get(client.public_key or "")
+            if not isinstance(state, dict):
+                continue
+
+            rx_total = self._safe_int(state.get("rx_total"))
+            tx_total = self._safe_int(state.get("tx_total"))
+            rolling_rx = self._safe_int(state.get("rolling_rx"))
+            rolling_tx = self._safe_int(state.get("rolling_tx"))
+            runtime_connected = bool(state.get("runtime_connected"))
+            latest_handshake_human = str(state.get("latest_handshake_human") or "") or None
+            data_received_human = str(state.get("data_received_human") or "") or None
+            data_sent_human = str(state.get("data_sent_human") or "") or None
+            policy_reason = str(state.get("policy_disabled_reason") or "") or None
+            manual_disabled = bool(state.get("manual_disabled"))
+            latest_handshake_at = self._timestamp_to_datetime(state.get("latest_handshake_at"))
+
+            previous_sample = (
+                db.query(ClientRuntimeSample)
+                .filter(ClientRuntimeSample.client_id == client.id)
+                .order_by(ClientRuntimeSample.sampled_at.desc(), ClientRuntimeSample.id.desc())
+                .first()
+            )
+            should_add_sample = previous_sample is None or previous_sample.sampled_at < refreshed_at
+            if should_add_sample:
+                if previous_sample is None:
+                    rx_delta = 0
+                    tx_delta = 0
+                else:
+                    rx_delta = rx_total - previous_sample.rx_bytes_total
+                    tx_delta = tx_total - previous_sample.tx_bytes_total
+                    if rx_delta < 0:
+                        rx_delta = rx_total
+                    if tx_delta < 0:
+                        tx_delta = tx_total
+                db.add(
+                    ClientRuntimeSample(
+                        client_id=client.id,
+                        server_id=server.id,
+                        sampled_at=refreshed_at,
+                        latest_handshake_at=latest_handshake_at,
+                        is_connected=runtime_connected,
+                        rx_bytes_total=rx_total,
+                        tx_bytes_total=tx_total,
+                        rx_bytes_delta=rx_delta,
+                        tx_bytes_delta=tx_delta,
+                    )
+                )
+
+            if (
+                client.runtime_connected != runtime_connected
+                or client.latest_handshake_human != latest_handshake_human
+                or client.data_received_human != data_received_human
+                or client.data_sent_human != data_sent_human
+                or client.traffic_used_30d_rx_bytes != rolling_rx
+                or client.traffic_used_30d_tx_bytes != rolling_tx
+                or client.policy_disabled_reason != policy_reason
+                or client.manual_disabled != manual_disabled
+            ):
+                updated_count += 1
+
+            client.runtime_connected = runtime_connected
+            client.latest_handshake_human = latest_handshake_human
+            client.data_received_human = data_received_human
+            client.data_sent_human = data_sent_human
+            client.traffic_used_30d_rx_bytes = rolling_rx
+            client.traffic_used_30d_tx_bytes = rolling_tx
+            client.runtime_refreshed_at = refreshed_at
+            client.manual_disabled = manual_disabled
+            client.policy_disabled_reason = policy_reason
+
+            if policy_reason == "traffic_limit" and client.traffic_limit_exceeded_at is None:
+                client.traffic_limit_exceeded_at = refreshed_at
+            elif policy_reason != "traffic_limit":
+                client.traffic_limit_exceeded_at = None
+
+            effective_disabled = manual_disabled or bool(policy_reason)
+            if effective_disabled and client.status == "active":
+                client.status = "disabled"
+            elif not effective_disabled and client.status == "disabled":
+                client.status = "active"
+
+            db.add(client)
+
+        self._prune_old_samples(db, refreshed_at - timedelta(days=45), server.id)
+        return updated_count, False
 
     async def upload(self, server: Server, content: str) -> None:
         password = self.credentials.get_ssh_password(server)

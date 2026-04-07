@@ -82,6 +82,17 @@
 - `runtime_flavor` support in server model and UI.
 - Bootstrap now re-inspects live AWG runtime automatically after install.
 - Managed-clients server picker now excludes `exit` nodes from `proxy + 1 exit` topologies.
+- Hybrid per-server agent foundation is implemented.
+- Server card now shows panel-agent status and manual actions.
+- Existing servers can install or reinstall the panel agent from the server card.
+- Server runtime metrics now prefer local agent results with SSH fallback.
+- Client runtime sync now prefers local agent results with SSH fallback.
+- `prepare` / `inspect-standard` now prefer local agent inspect with SSH fallback.
+- Agent now supports local-only policy enforcement groundwork:
+  - panel syncs `client-policies.json` to the server
+  - agent maintains `client-policy-state.json`
+  - offline enforcement loop can soft-disable peers locally by policy without panel round-trips
+  - panel can later pull local policy state back into DB counters and statuses
 
 ### Topologies
 
@@ -204,11 +215,17 @@
 
 ### Per-Server Agent
 
-- Design an agent which is installed automatically together with AWG on every managed server.
-- Let the agent continue traffic accounting when the central panel is offline.
-- Let the agent execute server-local panel tasks while the panel is unavailable.
-- Add deferred synchronization so the agent can push counters, task results, and local state back to the panel after reconnect.
-- Define conflict-resolution rules for offline-collected counters and server-side task results.
+- Finish moving remaining read-only SSH checks to agent handlers where safe.
+- Decide which write paths may later move to agent and which must stay SSH-only.
+- Add clearer agent status / task history UI in the server card or dedicated page.
+- Add explicit agent-side policy event journal and surface it in the UI.
+- Add conflict-resolution rules for offline-collected counters and server-side task results.
+- Add optional public-web sync mode after panel gets a stable external URL.
+- Harden and validate offline client-policy enforcement:
+  - rolling traffic limits
+  - `expires_at`
+  - quiet hours
+  - reconnect sync back into panel state
 
 ## Later
 
@@ -224,12 +241,15 @@
 
 ### Speed Limits
 
-- Implement per-peer bandwidth limits for docker-installed AWG servers.
+- Implement per-peer bandwidth limits through agent-managed `tc` shaping.
+- Use client `assigned_ip` as the stable shaping match key.
+- Keep shaping logic agent-side and reconcile-based, not ad-hoc shell from panel.
+- Decide exact scope for v1:
+  - single symmetric limit
+  - or separate RX / TX limits
 - Confirm whether shaping must be applied:
   - inside `amnezia-awg`
   - or on the host namespace
-- Build a reconcile-based speed-policy service instead of ad-hoc shell commands.
-- Use client `assigned_ip` as the stable shaping match key.
 - Add UI controls for speed policy in the client settings modal.
 
 ### Web Exposure And Hardening

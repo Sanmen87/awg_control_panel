@@ -192,6 +192,10 @@ class ServerMetricsService:
             sampled_at=sampled_at,
         )
 
+    def _build_snapshot_from_agent_payload(self, server: Server, payload: dict[str, object]) -> ServerMetricsSnapshot:
+        normalized = {key: str(value) for key, value in payload.items() if value is not None}
+        return self._build_snapshot(server, normalized)
+
     async def collect(self, server: Server) -> ServerMetricsSnapshot:
         result = await self.ssh.run_command(
             host=server.host,
@@ -210,6 +214,15 @@ class ServerMetricsService:
         if server.access_status != AccessStatus.OK:
             return False
         snapshot = await self.collect(server)
+        return self._persist_snapshot(db, server, snapshot)
+
+    def sync_server_from_agent_payload(self, db: Session, server: Server, payload: dict[str, object]) -> bool:
+        if server.access_status != AccessStatus.OK:
+            return False
+        snapshot = self._build_snapshot_from_agent_payload(server, payload)
+        return self._persist_snapshot(db, server, snapshot)
+
+    def _persist_snapshot(self, db: Session, server: Server, snapshot: ServerMetricsSnapshot) -> bool:
         server.host_metrics_json = snapshot.to_json()
         server.host_metrics_refreshed_at = snapshot.sampled_at
         server.status = ServerStatus.HEALTHY

@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.security import ALGORITHM
 from app.db.session import get_db
+from app.models.agent_node import AgentNode
 from app.models.user import User
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.api_v1_prefix}/auth/login")
@@ -30,3 +31,12 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise credentials_exception
     return user
 
+
+def get_current_agent(
+    x_agent_token: str = Header(..., alias="X-Agent-Token"),
+    db: Session = Depends(get_db),
+) -> AgentNode:
+    agent = db.query(AgentNode).filter(AgentNode.token == x_agent_token).first()
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid agent token")
+    return agent

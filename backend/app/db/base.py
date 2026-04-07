@@ -1,3 +1,5 @@
+from app.models.agent_node import AgentNode
+from app.models.agent_task import AgentTask
 from app.models.app_setting import AppSetting
 from app.models.audit_log import AuditLog
 from app.models.backup import BackupJob
@@ -16,6 +18,8 @@ from app.models.user import User
 
 __all__ = [
     "AppSetting",
+    "AgentNode",
+    "AgentTask",
     "AuditLog",
     "BackupJob",
     "Base",
