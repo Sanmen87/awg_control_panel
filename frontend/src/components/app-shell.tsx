@@ -2,10 +2,44 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { ReactNode, useEffect, useState } from "react";
 
 import { useAuth } from "./auth-context";
 import { useLocale } from "./locale-context";
+
+function IconBase({
+  children,
+  className
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.85">
+      {children}
+    </svg>
+  );
+}
+
+function MenuIcon({ className }: { className?: string }) {
+  return (
+    <IconBase className={className}>
+      <path d="M4 7h16" />
+      <path d="M4 12h16" />
+      <path d="M4 17h16" />
+    </IconBase>
+  );
+}
+
+function LogoutIcon({ className }: { className?: string }) {
+  return (
+    <IconBase className={className}>
+      <path d="M10 7V5a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2v-2" />
+      <path d="M15 12H4" />
+      <path d="m8 8-4 4 4 4" />
+    </IconBase>
+  );
+}
 
 const navigation = {
   en: {
@@ -55,15 +89,27 @@ export function AppShell({
   const [settingsOpen, setSettingsOpen] = useState(
     pathname.startsWith("/settings") || pathname.startsWith("/servers") || pathname.startsWith("/backups") || pathname.startsWith("/topologies") || pathname.startsWith("/jobs")
   );
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const copy = locale === "ru"
-    ? { title: "Навигация", logout: "Выйти", madeBy: "Сделано Sunmen87" }
-    : { title: "Navigation", logout: "Logout", madeBy: "Made by Sunmen87" };
+    ? { title: "Навигация", logout: "Выйти", madeBy: "Сделано Sunmen87", menu: "Меню", closeMenu: "Закрыть меню" }
+    : { title: "Navigation", logout: "Logout", madeBy: "Made by Sunmen87", menu: "Menu", closeMenu: "Close menu" };
   const nav = navigation[locale];
+
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [pathname]);
 
   return (
     <div className="layout">
       <div className="shell app-shell">
-        <aside className="sidebar">
+        <button
+          type="button"
+          className={`sidebar-backdrop ${mobileMenuOpen ? "is-open" : ""}`}
+          aria-hidden={!mobileMenuOpen}
+          tabIndex={mobileMenuOpen ? 0 : -1}
+          onClick={() => setMobileMenuOpen(false)}
+        />
+        <aside className={`sidebar ${mobileMenuOpen ? "is-open" : ""}`}>
           <div className="sidebar-section sidebar-section-brand">
             <div className="brand-block">
               <span className="eyebrow">AWG Control Panel</span>
@@ -93,6 +139,7 @@ export function AppShell({
                   key={item.href}
                   href={item.href}
                   className={pathname === item.href ? "nav-link active" : "nav-link"}
+                  onClick={() => setMobileMenuOpen(false)}
                 >
                   {item.label}
                 </Link>
@@ -118,6 +165,7 @@ export function AppShell({
                         key={item.href}
                         href={item.href}
                         className={pathname === item.href ? "nav-link nav-sublink active" : "nav-link nav-sublink"}
+                        onClick={() => setMobileMenuOpen(false)}
                       >
                         {item.label}
                       </Link>
@@ -128,11 +176,30 @@ export function AppShell({
             </nav>
           </div>
           {sidebarExtra ? <div className="sidebar-section sidebar-extra">{sidebarExtra}</div> : null}
+          {token ? (
+            <div className="sidebar-section sidebar-mobile-exit">
+              <button type="button" className="secondary-button" onClick={logout}>
+                {copy.logout}
+              </button>
+            </div>
+          ) : null}
         </aside>
         <section className="content-panel">
           {token ? (
             <div className="content-topbar">
-              <button type="button" className="secondary-button" onClick={logout}>
+              <div className="mobile-shell-bar">
+                <button
+                  type="button"
+                  className="secondary-button mobile-nav-button"
+                  aria-expanded={mobileMenuOpen}
+                  aria-label={mobileMenuOpen ? copy.closeMenu : copy.menu}
+                  onClick={() => setMobileMenuOpen((current) => !current)}
+                >
+                  <MenuIcon className="mobile-bar-icon" />
+                  <span>{copy.menu}</span>
+                </button>
+              </div>
+              <button type="button" className="secondary-button desktop-logout-button" onClick={logout}>
                 {copy.logout}
               </button>
             </div>

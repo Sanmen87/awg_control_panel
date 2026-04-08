@@ -172,6 +172,11 @@ Notes:
 - separate settings modal from gear icon
 - QR enlarge-on-click
 - source, runtime, status, and actions shown with unified pictograms
+- mobile interface foundation is implemented:
+  - separate `mobile.css` override layer
+  - mobile drawer navigation
+  - mobile bottom control bar
+  - clients list adapted into stacked cards on narrow screens
 
 #### Backups
 
@@ -525,6 +530,11 @@ sudo docker compose up -d backend worker scheduler frontend nginx
 - отдельная модалка настроек по шестерёнке
 - QR можно увеличить кликом
 - источник, runtime, статус и действия показаны через единый набор пиктограмм
+- реализована базовая мобильная версия интерфейса:
+  - отдельный слой `mobile.css`
+  - mobile drawer-навигация
+  - нижняя управляющая mobile-панель
+  - список клиентов на узком экране превращается в набор карточек
 
 #### Бэкапы
 

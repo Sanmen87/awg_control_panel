@@ -1276,11 +1276,11 @@ export function ClientsPageClient() {
                 <tbody>
                   {filteredClients.map((client) => (
                     <tr key={client.id} className="clients-row-clickable" onClick={() => void openClientModal(client)}>
-                      <td className="clients-cell-name">
+                      <td className="clients-cell-name" data-label={copy.fields.name}>
                         <div className="clients-primary-text">{client.name}</div>
                         <div className="clients-secondary-text">{client.latest_handshake_human ?? copy.runtimeUnknown}</div>
                       </td>
-                      <td>
+                      <td data-label={copy.fields.server}>
                         <span className="server-cell-with-flag">
                           {flagForCountry(serverMetadata(client.server_id)?.country_code) ? (
                             <span className="country-flag" title={geoTitle(serverMetadata(client.server_id)) ?? undefined}>
@@ -1290,19 +1290,19 @@ export function ClientsPageClient() {
                           <span>{serverName(client.server_id)}</span>
                         </span>
                       </td>
-                      <td className="clients-cell-mono">{client.assigned_ip}</td>
-                      <td>
+                      <td className="clients-cell-mono" data-label={copy.fields.ip}>{client.assigned_ip}</td>
+                      <td data-label={copy.fields.source}>
                         <span className="clients-icon-chip" title={sourceTooltip(client.source)}>
                           {client.source === "imported" ? <ImportIcon className="clients-inline-icon" /> : <ComputerIcon className="clients-inline-icon" />}
                         </span>
                       </td>
-                      <td>
+                      <td data-label={copy.fields.runtime}>
                         <div className="clients-runtime-stack" title={client.runtime_connected ? copy.online : copy.offline}>
                           <CircleIcon className={`clients-runtime-dot ${client.runtime_connected ? "is-online" : "is-offline"}`} />
                           <span className="clients-runtime-meta">{client.latest_handshake_human ?? "—"}</span>
                         </div>
                       </td>
-                      <td>
+                      <td data-label={copy.fields.status}>
                         <div className="clients-runtime-stack">
                           <span
                             className={`clients-icon-chip ${client.traffic_limit_exceeded_at ? "is-limit-exceeded" : ""}`}
@@ -1317,7 +1317,7 @@ export function ClientsPageClient() {
                           ) : null}
                         </div>
                       </td>
-                      <td className="clients-cell-note">
+                      <td className="clients-cell-note" data-label={copy.fields.traffic}>
                         <div className="clients-traffic-stack">
                           <span>
                             {client.data_received_human || client.data_sent_human
@@ -1329,9 +1329,9 @@ export function ClientsPageClient() {
                           </span>
                         </div>
                       </td>
-                      <td className="clients-cell-note">{renderLimitState(client)}</td>
-                      <td className="clients-cell-note">{client.import_note?.trim() || "—"}</td>
-                      <td>
+                      <td className="clients-cell-note" data-label={copy.fields.limits}>{renderLimitState(client)}</td>
+                      <td className="clients-cell-note" data-label={copy.fields.note}>{client.import_note?.trim() || "—"}</td>
+                      <td data-label={copy.fields.actions}>
                         <div className="clients-icon-actions" onClick={stopRowClick}>
                           <button
                             type="button"

@@ -235,6 +235,10 @@ a {
   top: 24px;
 }
 
+.sidebar-backdrop {
+  display: none;
+}
+
 .brand-block h1,
 .page-header h2,
 .auth-card h2,
@@ -361,6 +365,18 @@ a {
   z-index: 5;
   display: flex;
   justify-content: flex-end;
+}
+
+.mobile-nav-button {
+  display: none;
+}
+
+.mobile-shell-bar {
+  display: none;
+}
+
+.desktop-logout-button {
+  display: inline-flex;
 }
 
 .auth-shell {
@@ -1610,57 +1626,4 @@ a {
 .lang-button.active {
   background: var(--accent);
   color: #fff7eb;
-}
-
-@media (max-width: 720px) {
-  .layout {
-    padding: 20px;
-  }
-
-  .hero-topbar {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-}
-
-@media (max-width: 980px) {
-  .app-shell,
-  .content-grid,
-  .clients-layout,
-  .topology-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .dashboard-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .dashboard-card,
-  .dashboard-card-wide {
-    grid-column: span 1;
-  }
-
-  .dashboard-server-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .sidebar {
-    position: static;
-  }
-
-  .exit-row {
-    grid-template-columns: 1fr;
-  }
-
-  .client-filters-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .clients-modal-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .clients-settings-grid {
-    grid-template-columns: 1fr;
-  }
 }

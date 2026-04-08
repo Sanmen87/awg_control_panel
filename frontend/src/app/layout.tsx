@@ -1,4 +1,5 @@
 import "./globals.css";
+import "./mobile.css";
 import type { Metadata } from "next";
 import { AuthProvider } from "../components/auth-context";
 import { LocaleProvider } from "../components/locale-context";
