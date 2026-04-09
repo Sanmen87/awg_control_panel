@@ -2,6 +2,7 @@
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20260323_0005"
@@ -10,7 +11,7 @@ branch_labels = None
 depends_on = None
 
 
-client_source = sa.Enum("generated", "imported", name="client_source", create_type=False)
+client_source = postgresql.ENUM("generated", "imported", name="client_source", create_type=False)
 
 
 def upgrade() -> None:

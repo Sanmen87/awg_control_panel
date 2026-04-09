@@ -2,6 +2,7 @@
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20260323_0006"
@@ -10,8 +11,8 @@ branch_labels = None
 depends_on = None
 
 
-access_status = sa.Enum("pending", "ok", "failed", name="access_status", create_type=False)
-awg_status = sa.Enum("unknown", "detected", "missing", name="awg_status", create_type=False)
+access_status = postgresql.ENUM("pending", "ok", "failed", name="access_status", create_type=False)
+awg_status = postgresql.ENUM("unknown", "detected", "missing", name="awg_status", create_type=False)
 
 
 def upgrade() -> None:

@@ -2,6 +2,7 @@
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20260319_0002"
@@ -10,11 +11,11 @@ branch_labels = None
 depends_on = None
 
 
-topology_node_role = sa.Enum("standard-vpn", "proxy", "exit", "proxy-secondary", name="topology_node_role", create_type=False)
-job_type = sa.Enum("bootstrap-server", "deploy-topology", "check-server", "backup", name="job_type", create_type=False)
-job_status = sa.Enum("pending", "running", "succeeded", "failed", name="job_status", create_type=False)
-backup_type = sa.Enum("database", "configs", "full", name="backup_type", create_type=False)
-backup_status = sa.Enum("pending", "running", "succeeded", "failed", name="backup_status", create_type=False)
+topology_node_role = postgresql.ENUM("standard-vpn", "proxy", "exit", "proxy-secondary", name="topology_node_role", create_type=False)
+job_type = postgresql.ENUM("bootstrap-server", "deploy-topology", "check-server", "backup", name="job_type", create_type=False)
+job_status = postgresql.ENUM("pending", "running", "succeeded", "failed", name="job_status", create_type=False)
+backup_type = postgresql.ENUM("database", "configs", "full", name="backup_type", create_type=False)
+backup_status = postgresql.ENUM("pending", "running", "succeeded", "failed", name="backup_status", create_type=False)
 
 
 def upgrade() -> None:

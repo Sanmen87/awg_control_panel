@@ -2,6 +2,7 @@
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20260319_0004"
@@ -10,7 +11,7 @@ branch_labels = None
 depends_on = None
 
 
-install_method = sa.Enum("native", "docker", "custom", name="install_method", create_type=False)
+install_method = postgresql.ENUM("native", "docker", "custom", name="install_method", create_type=False)
 
 
 def upgrade() -> None:

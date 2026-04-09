@@ -2,6 +2,7 @@
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "20260319_0001"
@@ -10,10 +11,10 @@ branch_labels = None
 depends_on = None
 
 
-server_role = sa.Enum("standard-vpn", "proxy", "exit", "proxy-secondary", name="server_role", create_type=False)
-server_status = sa.Enum("new", "healthy", "degraded", "error", name="server_status", create_type=False)
-topology_type = sa.Enum("standard", "proxy-exit", "proxy-multi-exit", name="topology_type", create_type=False)
-topology_status = sa.Enum("draft", "pending", "applied", "error", name="topology_status", create_type=False)
+server_role = postgresql.ENUM("standard-vpn", "proxy", "exit", "proxy-secondary", name="server_role", create_type=False)
+server_status = postgresql.ENUM("new", "healthy", "degraded", "error", name="server_status", create_type=False)
+topology_type = postgresql.ENUM("standard", "proxy-exit", "proxy-multi-exit", name="topology_type", create_type=False)
+topology_status = postgresql.ENUM("draft", "pending", "applied", "error", name="topology_status", create_type=False)
 
 
 def upgrade() -> None:
