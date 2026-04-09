@@ -47,6 +47,13 @@ class ProxyFailoverAgentService:
             failover = json.loads(topology.failover_config_json) if topology.failover_config_json else {}
         except json.JSONDecodeError:
             failover = {}
+        try:
+            metadata = json.loads(topology.metadata_json) if topology.metadata_json else {}
+        except json.JSONDecodeError:
+            metadata = {}
+        proxy_routing_mode = metadata.get("proxy_routing_mode") if isinstance(metadata, dict) else None
+        if not isinstance(proxy_routing_mode, str) or not proxy_routing_mode.strip():
+            proxy_routing_mode = "all_via_exit"
         sorted_exit_nodes = sorted(exit_nodes, key=lambda item: item.priority)
         default_exit_server_id = sorted_exit_nodes[0].server_id if sorted_exit_nodes else None
         exits = []
@@ -63,6 +70,7 @@ class ProxyFailoverAgentService:
             "topology_id": topology.id,
             "proxy_server_id": proxy_server.id,
             "proxy_client_subnet": proxy_client_subnet,
+            "proxy_routing_mode": proxy_routing_mode,
             "default_exit_server_id": default_exit_server_id,
             "active_exit_server_id": topology.active_exit_server_id or default_exit_server_id,
             "retries": int(failover.get("retries", 3) or 3),
@@ -110,6 +118,8 @@ from datetime import datetime, timezone
 
 STATE_PATH = "/etc/awg-panel/proxy-failover-state.json"
 STATUS_PATH = "/var/lib/awg-panel/proxy-failover-status.json"
+SELECTIVE_ROUTESET_NAME = "awg-selective-routes"
+SELECTIVE_CHAIN_NAME = "AWG-PROXY-SELECTIVE"
 
 
 def utc_now():
@@ -188,6 +198,73 @@ def switch_client_exit(source_cidr, exit_item, priority):
     run(["ip", "rule", "add", "priority", str(priority), "from", source_cidr, "table", str(exit_item["table_id"])], check=True)
 
 
+def reconcile_selective_chain(subnet, active_exit, overrides):
+    run(["iptables", "-t", "mangle", "-N", SELECTIVE_CHAIN_NAME], check=False)
+    run(["iptables", "-t", "mangle", "-F", SELECTIVE_CHAIN_NAME], check=False)
+    prerouting = run(["iptables", "-t", "mangle", "-C", "PREROUTING", "-j", SELECTIVE_CHAIN_NAME])
+    if prerouting.returncode != 0:
+        run(["iptables", "-t", "mangle", "-A", "PREROUTING", "-j", SELECTIVE_CHAIN_NAME], check=True)
+
+    for item in overrides:
+        source_cidr = item.get("source_cidr")
+        exit_item = item.get("exit_item")
+        if not source_cidr or not exit_item:
+            continue
+        mark_value = hex(int(exit_item["table_id"]))
+        run(
+            [
+                "iptables",
+                "-t",
+                "mangle",
+                "-A",
+                SELECTIVE_CHAIN_NAME,
+                "-s",
+                source_cidr,
+                "-m",
+                "set",
+                "--match-set",
+                SELECTIVE_ROUTESET_NAME,
+                "dst",
+                "-m",
+                "mark",
+                "--mark",
+                "0x0/0xffffffff",
+                "-j",
+                "MARK",
+                "--set-xmark",
+                f"{mark_value}/0xffffffff",
+            ],
+            check=True,
+        )
+
+    default_mark = hex(int(active_exit["table_id"]))
+    run(
+        [
+            "iptables",
+            "-t",
+            "mangle",
+            "-A",
+            SELECTIVE_CHAIN_NAME,
+            "-s",
+            subnet,
+            "-m",
+            "set",
+            "--match-set",
+            SELECTIVE_ROUTESET_NAME,
+            "dst",
+            "-m",
+            "mark",
+            "--mark",
+            "0x0/0xffffffff",
+            "-j",
+            "MARK",
+            "--set-xmark",
+            f"{default_mark}/0xffffffff",
+        ],
+        check=True,
+    )
+
+
 def find_exit(exits, server_id):
     for item in exits:
         if item["server_id"] == server_id:
@@ -211,6 +288,7 @@ def main():
         state = load_json(STATE_PATH, {})
         exits = sorted(state.get("exits", []), key=lambda item: item.get("priority", 10))
         subnet = state.get("proxy_client_subnet")
+        selective_mode = state.get("proxy_routing_mode") == "selective_via_exit"
         override_clients = state.get("override_clients", [])
         default_exit_server_id = state.get("default_exit_server_id")
         active_exit_server_id = runtime.get("active_exit_server_id") or state.get("active_exit_server_id") or default_exit_server_id
@@ -251,7 +329,8 @@ def main():
             if int(status_payload["failure_streak"]) >= retries:
                 candidate = choose_best_exit(exits, health)
                 if candidate and candidate["server_id"] != active_exit["server_id"]:
-                    switch_default_exit(subnet, candidate)
+                    if not selective_mode:
+                        switch_default_exit(subnet, candidate)
                     active_exit = candidate
                     status_payload["active_exit_server_id"] = candidate["server_id"]
                     status_payload["last_switch_at"] = utc_now()
@@ -264,7 +343,8 @@ def main():
                 else:
                     status_payload["primary_success_streak"] = 0
                 if int(status_payload["primary_success_streak"]) >= failback_successes:
-                    switch_default_exit(subnet, primary_exit)
+                    if not selective_mode:
+                        switch_default_exit(subnet, primary_exit)
                     status_payload["active_exit_server_id"] = primary_exit["server_id"]
                     status_payload["last_switch_at"] = utc_now()
                     status_payload["last_switch_reason"] = "auto-failback-to-primary"
@@ -272,13 +352,17 @@ def main():
             else:
                 status_payload["primary_success_streak"] = 0
 
-            switch_default_exit(subnet, active_exit)
+            if selective_mode:
+                remove_existing_rule(subnet)
+            else:
+                switch_default_exit(subnet, active_exit)
 
             runtime_overrides = runtime.get("override_clients", {})
             if not isinstance(runtime_overrides, dict):
                 runtime_overrides = {}
             next_overrides = {}
             moved_override_clients = 0
+            selective_overrides = []
             for index, item in enumerate(override_clients):
                 source_cidr = item.get("source_cidr")
                 preferred_exit_server_id = item.get("preferred_exit_server_id")
@@ -321,9 +405,18 @@ def main():
                 else:
                     preferred_success_streak = 0
 
-                switch_client_exit(source_cidr, current_exit, 1000 + index)
-                if current_exit_server_id != preferred_exit_server_id:
-                    moved_override_clients += 1
+                if selective_mode:
+                    remove_existing_rule(source_cidr)
+                    selective_overrides.append(
+                        {
+                            "source_cidr": source_cidr,
+                            "exit_item": current_exit,
+                        }
+                    )
+                else:
+                    switch_client_exit(source_cidr, current_exit, 1000 + index)
+                    if current_exit_server_id != preferred_exit_server_id:
+                        moved_override_clients += 1
                 next_overrides[client_id] = {
                     "source_cidr": source_cidr,
                     "preferred_exit_server_id": preferred_exit_server_id,
@@ -334,6 +427,8 @@ def main():
 
             status_payload["override_clients"] = next_overrides
             status_payload["moved_override_clients"] = moved_override_clients
+            if selective_mode:
+                reconcile_selective_chain(subnet, active_exit, selective_overrides)
 
         except Exception as exc:
             status_payload["status"] = "error"
@@ -406,7 +501,8 @@ WantedBy=multi-user.target
                     f"chmod 600 {shlex.quote(STATE_PATH)}",
                     f"chmod 755 {shlex.quote(SCRIPT_PATH)}",
                     "systemctl daemon-reload",
-                    f"systemctl enable --now {shlex.quote(SERVICE_NAME)}",
+                    f"systemctl enable {shlex.quote(SERVICE_NAME)}",
+                    f"systemctl restart {shlex.quote(SERVICE_NAME)}",
                 ]
             ),
             sudo_password,

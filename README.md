@@ -122,6 +122,28 @@ Notes:
 - topology deploy now cleans stale proxy-side `MASQUERADE` and old service-peer leftovers
 - bootstrap now re-inspects live runtime automatically so a freshly installed server becomes usable without a second manual prepare step
 - server picker for managed clients now hides `exit` nodes of `proxy + 1 exit` topologies
+- topology metadata now includes proxy routing mode for proxy topologies:
+  - `all via exit`
+  - `selective via exit`
+- selective proxy routing is implemented for `proxy + 1 exit` and `proxy + multi-exit`
+  - current route source is static `backend/routip/routes.txt`
+  - addresses from that list go through exit
+  - all other destinations use the proxy server local uplink
+  - current practical route set includes:
+    - Telegram
+    - Google
+    - Netflix
+    - OpenAI
+    - Twitter/X
+    - Discord
+- selective routing runtime on proxy now manages:
+  - `ipset`
+  - `iptables mangle` marking
+  - per-exit policy tables
+- proxy failover agent is now selective-aware:
+  - it no longer reintroduces conflicting source-based rules in selective mode
+  - it restarts cleanly on reinstall
+  - in multi-exit mode it can rebuild selective default-path marking for the active exit
 
 #### Clients
 
@@ -177,6 +199,10 @@ Notes:
   - mobile drawer navigation
   - mobile bottom control bar
   - clients list adapted into stacked cards on narrow screens
+- topology editor UI now includes:
+  - proxy routing mode selector for proxy topologies
+  - updated copy for the current single compatible AWG profile
+  - updated selective-routing helper text reflecting the current static route list
 
 #### Backups
 
@@ -258,6 +284,7 @@ Notes:
   - server card shows agent status
   - manual actions:
     - install agent
+    - reinstall agent
     - reinstall agent
     - refresh agent status
     - fetch local results
@@ -480,6 +507,30 @@ sudo docker compose up -d backend worker scheduler frontend nginx
 - deploy topology теперь чистит stale `MASQUERADE` на proxy и старые service-peer хвосты
 - после bootstrap сервер теперь автоматически переинспектируется и становится пригодным для topology / managed clients без второго ручного `Подготовить сервер`
 - в списке серверов для managed clients больше не показываются `exit`-ноды topology `proxy + 1 exit`
+- metadata topology теперь хранит режим маршрутизации proxy:
+  - `всё через exit`
+  - `только список через exit`
+- selective routing реализован для:
+  - `proxy + 1 exit`
+  - `proxy + multi-exit`
+- текущий источник маршрутов статичный:
+  - [routes.txt](awg_control_panel/backend/routip/routes.txt)
+- сейчас через exit идут адреса для:
+  - `Telegram`
+  - `Google`
+  - `Netflix`
+  - `OpenAI`
+  - `Twitter/X`
+  - `Discord`
+- остальной трафик клиентов выходит напрямую через интернет proxy-сервера
+- runtime selective routing на proxy сейчас управляет:
+  - `ipset`
+  - `iptables mangle`
+  - отдельными per-exit policy tables
+- `proxy_failover_agent` теперь учитывает selective mode:
+  - не возвращает конфликтующие source-based `ip rule`
+  - перезапускается при reinstall новым кодом
+  - в `multi-exit` умеет пересобрать default selective path под активный exit
 
 #### Клиенты
 
@@ -535,6 +586,10 @@ sudo docker compose up -d backend worker scheduler frontend nginx
   - mobile drawer-навигация
   - нижняя управляющая mobile-панель
   - список клиентов на узком экране превращается в набор карточек
+- редактор topology теперь показывает:
+  - selector режима маршрутизации proxy
+  - обновлённый helper по AWG profile
+  - обновлённый helper по selective routing под текущий статичный список
 
 #### Бэкапы
 
@@ -611,6 +666,8 @@ sudo docker compose up -d backend worker scheduler frontend nginx
 - что уже использует панель:
   - карточка сервера показывает статус агента
   - ручные действия:
+    - установить агент
+    - переустановить агент
     - установить агент
     - проверить агента
     - забрать результаты

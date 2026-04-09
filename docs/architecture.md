@@ -41,6 +41,10 @@ Current hybrid agent direction also includes:
   - quiet hours
 - panel-side reconciliation of offline-collected policy state back into DB
 - future per-peer bandwidth shaping through agent-managed `tc`, keyed by client `assigned_ip`
+- proxy selective-routing reconcile:
+  - static route list source today
+  - `ipset` + `iptables mangle` + per-exit route tables on proxy
+  - failover-agent coordination so selective mode is not broken by source-based `ip rule`
 
 Future iterations will add:
 
@@ -53,3 +57,4 @@ Future iterations will add:
 - careful evaluation of which write paths may later move to agent
 - explicit policy event journal and conflict resolution for offline enforcement
 - reconcile-based peer bandwidth policy service
+- dynamic route-list generation and refresh for selective proxy routing

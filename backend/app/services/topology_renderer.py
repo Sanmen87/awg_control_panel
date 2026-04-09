@@ -56,6 +56,16 @@ class TopologyRenderer:
             return subnet.strip()
         return "10.100.0.0/24"
 
+    def _proxy_routing_mode(self, topology: Topology) -> str:
+        try:
+            metadata = json.loads(topology.metadata_json) if topology.metadata_json else {}
+        except json.JSONDecodeError:
+            metadata = {}
+        value = metadata.get("proxy_routing_mode")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "all_via_exit"
+
     def _proxy_interface_address(self, topology: Topology) -> str:
         subnet = self._proxy_client_subnet(topology)
         network = ipaddress.ip_network(subnet, strict=False)
@@ -207,6 +217,7 @@ class TopologyRenderer:
 
             proxy_subnet = self._proxy_client_subnet(topology)
             proxy_interface_address = self._proxy_interface_address(topology)
+            proxy_routing_mode = self._proxy_routing_mode(topology)
             obfuscation_fields = self.awg_profile.for_subject(topology)
 
             proxy_runtime = {}
@@ -216,6 +227,7 @@ class TopologyRenderer:
                 except json.JSONDecodeError:
                     proxy_runtime = {}
             proxy_config_preview = proxy_runtime.get("config_preview") if isinstance(proxy_runtime, dict) else None
+            proxy_client_interface_name = getattr(proxy_server, "live_interface_name", None) or "awg0"
             proxy_has_live_config = (
                 isinstance(proxy_config_preview, str)
                 and proxy_config_preview.strip()
@@ -363,6 +375,8 @@ class TopologyRenderer:
                             metadata={
                                 "proxy_exit_role": "proxy",
                                 "proxy_client_subnet": proxy_subnet,
+                                "proxy_client_interface": proxy_client_interface_name,
+                                "proxy_routing_mode": proxy_routing_mode,
                                 "proxy_service_table_id": service_table_id,
                                 "preserve_server_runtime": "1",
                             },

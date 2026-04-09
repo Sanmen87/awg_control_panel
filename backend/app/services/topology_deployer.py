@@ -6,6 +6,7 @@ import json
 import re
 import shlex
 from datetime import UTC, datetime
+from pathlib import Path
 
 from app.models.client import Client
 from app.models.server import Server, ServerRole
@@ -34,6 +35,11 @@ printf '{"private":"%s","public":"%s"}\n' "$priv" "$pub"
 
 SSH_PREPARE_TIMEOUT_SECONDS = 120.0
 SSH_APPLY_TIMEOUT_SECONDS = 300.0
+SELECTIVE_ROUTES_REMOTE_PATH = "/var/lib/awg-panel/selective-routes.txt"
+SELECTIVE_ROUTESET_NAME = "awg-selective-routes"
+SELECTIVE_CHAIN_NAME = "AWG-PROXY-SELECTIVE"
+LOCAL_ROUTE_LIST_PATH = Path(__file__).resolve().parents[2] / "routip" / "routes.txt"
+SELECTIVE_RULE_PRIORITY_BASE = 1000
 
 
 class TopologyDeployer:
@@ -83,6 +89,42 @@ class TopologyDeployer:
             return str(ipaddress.ip_network(assigned_ip, strict=False))
         except ValueError:
             return None
+
+    def _topology_metadata(self, topology: Topology) -> dict[str, object]:
+        if not topology.metadata_json:
+            return {}
+        try:
+            parsed = json.loads(topology.metadata_json)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _proxy_routing_mode(self, topology: Topology) -> str:
+        value = self._topology_metadata(topology).get("proxy_routing_mode")
+        return value if isinstance(value, str) and value.strip() else "all_via_exit"
+
+    def _is_selective_proxy_routing(self, topology: Topology) -> bool:
+        return self._proxy_routing_mode(topology) == "selective_via_exit"
+
+    def _load_selective_routes_content(self) -> str:
+        if not LOCAL_ROUTE_LIST_PATH.exists():
+            raise RuntimeError(f"Selective route list file is missing: {LOCAL_ROUTE_LIST_PATH}")
+        lines = []
+        for raw in LOCAL_ROUTE_LIST_PATH.read_text(encoding="utf-8").splitlines():
+            item = raw.strip()
+            if not item or item.startswith("#"):
+                continue
+            lines.append(item)
+        if not lines:
+            raise RuntimeError("Selective route list file is empty")
+        return "\n".join(lines) + "\n"
+
+    def _selective_rule_priority(self, table_id: str) -> int:
+        try:
+            numeric = int(table_id)
+        except ValueError:
+            numeric = 0
+        return SELECTIVE_RULE_PRIORITY_BASE + max(0, numeric - 51820)
 
     def _resolve_proxy_exit_policy(
         self,
@@ -167,6 +209,7 @@ class TopologyDeployer:
             return []
         interface = shlex.quote(config.interface_name)
         table_id = shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")
+        selective_mode = config.metadata.get("proxy_routing_mode") == "selective_via_exit"
         default_subnet_rule = config.metadata.get("proxy_policy_default_subnet") == "1"
         source_rules_raw = config.metadata.get("proxy_policy_sources_json") or "[]"
         try:
@@ -174,14 +217,15 @@ class TopologyDeployer:
         except json.JSONDecodeError:
             source_rules = []
         commands = [f'ip route flush table {table_id} || true']
-        if default_subnet_rule:
-            commands.append(f'ip rule add priority 200 from {shlex.quote(subnet)} table {table_id}')
-        for index, source in enumerate(source_rules):
-            if not isinstance(source, str) or not source.strip():
-                continue
-            commands.append(
-                f'ip rule add priority {100 + index} from {shlex.quote(source.strip())} table {table_id}'
-            )
+        if not selective_mode:
+            if default_subnet_rule:
+                commands.append(f'ip rule add priority 200 from {shlex.quote(subnet)} table {table_id}')
+            for index, source in enumerate(source_rules):
+                if not isinstance(source, str) or not source.strip():
+                    continue
+                commands.append(
+                    f'ip rule add priority {100 + index} from {shlex.quote(source.strip())} table {table_id}'
+                )
         commands.extend(
             [
                 f'ip route replace {shlex.quote(subnet)} dev {interface} table {table_id}',
@@ -196,6 +240,7 @@ class TopologyDeployer:
         subnet = config.metadata.get("proxy_client_subnet")
         if not subnet:
             return []
+        selective_mode = config.metadata.get("proxy_routing_mode") == "selective_via_exit"
         cleanup_sources_raw = config.metadata.get("proxy_policy_cleanup_sources_json") or "[]"
         try:
             cleanup_sources = json.loads(cleanup_sources_raw)
@@ -213,15 +258,211 @@ class TopologyDeployer:
                 "done; "
                 "fi"
             ),
-            f'while ip rule show | grep -Fq "from {subnet} lookup {config.metadata.get("proxy_service_table_id") or "51820"}"; do ip rule del priority 200 from {shlex.quote(subnet)} table {shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")} || ip rule del from {shlex.quote(subnet)} table {shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")} || break; done',
         ]
-        for index, source in enumerate(cleanup_sources):
-            if not isinstance(source, str) or not source.strip():
-                continue
-            commands.append(
-                f'while ip rule show | grep -Fq "from {source.strip()} lookup {config.metadata.get("proxy_service_table_id") or "51820"}"; do ip rule del priority {100 + index} from {shlex.quote(source.strip())} table {shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")} || ip rule del from {shlex.quote(source.strip())} table {shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")} || break; done'
-            )
+        default_table_id = shlex.quote(config.metadata.get("proxy_service_table_id") or "51820")
+        commands.append(
+            f'while ip rule show | grep -Fq "from {subnet} lookup {config.metadata.get("proxy_service_table_id") or "51820"}"; do ip rule del priority 200 from {shlex.quote(subnet)} table {default_table_id} || ip rule del from {shlex.quote(subnet)} table {default_table_id} || break; done'
+        )
+        if not selective_mode:
+            for index, source in enumerate(cleanup_sources):
+                if not isinstance(source, str) or not source.strip():
+                    continue
+                commands.append(
+                    f'while ip rule show | grep -Fq "from {source.strip()} lookup {config.metadata.get("proxy_service_table_id") or "51820"}"; do ip rule del priority {100 + index} from {shlex.quote(source.strip())} table {default_table_id} || ip rule del from {shlex.quote(source.strip())} table {default_table_id} || break; done'
+                )
+        else:
+            for source in cleanup_sources:
+                if not isinstance(source, str) or not source.strip() or source.strip() == subnet:
+                    continue
+                commands.append(
+                    f'while ip rule show | grep -Fq "from {source.strip()} lookup {config.metadata.get("proxy_service_table_id") or "51820"}"; do ip rule del from {shlex.quote(source.strip())} table {default_table_id} || break; done'
+                )
         return commands
+
+    async def _apply_proxy_selective_runtime(
+        self,
+        topology: Topology,
+        proxy_server: Server,
+        proxy_configs: list[RenderedConfig],
+    ) -> None:
+        if not proxy_configs:
+            return
+        proxy_subnet = proxy_configs[0].metadata.get("proxy_client_subnet") if proxy_configs[0].metadata else None
+        proxy_client_interface = (
+            proxy_configs[0].metadata.get("proxy_client_interface") if proxy_configs[0].metadata else None
+        ) or "awg0"
+        password = self.credentials.get_ssh_password(proxy_server)
+        private_key = self.credentials.get_private_key(proxy_server)
+        sudo_password = self.credentials.get_sudo_password(proxy_server)
+        table_ids = sorted(
+            {
+                str(item.metadata.get("proxy_service_table_id"))
+                for item in proxy_configs
+                if item.metadata and item.metadata.get("proxy_service_table_id")
+            }
+        )
+        ensure_ipset_steps = [
+            'if ! command -v ipset >/dev/null 2>&1; then '
+            'if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update >/dev/null 2>&1 && apt-get install -y ipset >/dev/null 2>&1; '
+            'elif command -v dnf >/dev/null 2>&1; then dnf install -y ipset >/dev/null 2>&1; '
+            'elif command -v yum >/dev/null 2>&1; then yum install -y ipset >/dev/null 2>&1; '
+            'elif command -v apk >/dev/null 2>&1; then apk add --no-cache ipset >/dev/null 2>&1; '
+            'fi; '
+            'fi',
+            'command -v ipset >/dev/null 2>&1 || { echo "ipset is required for selective proxy routing" >&2; exit 46; }',
+        ]
+
+        cleanup_steps = [
+            "set -e",
+            "command -v iptables >/dev/null 2>&1 || { echo \"iptables is required for selective proxy routing\" >&2; exit 45; }",
+            *ensure_ipset_steps,
+            "modprobe ip_set >/dev/null 2>&1 || true",
+            "modprobe xt_set >/dev/null 2>&1 || true",
+            f"ipset create {SELECTIVE_ROUTESET_NAME} hash:net family inet -exist >/dev/null 2>&1 || true",
+            f"if iptables -t mangle -S {SELECTIVE_CHAIN_NAME} >/dev/null 2>&1; then "
+            f"iptables -t mangle -D PREROUTING -j {SELECTIVE_CHAIN_NAME} 2>/dev/null || true; "
+            f"iptables -t mangle -F {SELECTIVE_CHAIN_NAME} 2>/dev/null || true; "
+            f"iptables -t mangle -X {SELECTIVE_CHAIN_NAME} 2>/dev/null || true; "
+            "fi",
+            f"ipset destroy {SELECTIVE_ROUTESET_NAME} 2>/dev/null || true",
+        ]
+        if proxy_subnet:
+            quoted_subnet = shlex.quote(proxy_subnet)
+            quoted_iface = shlex.quote(proxy_client_interface)
+            cleanup_steps.extend(
+                [
+                    'UPLINK_IFACE="$(ip route show default 2>/dev/null | awk \'/default/ {print $5; exit}\')"',
+                    'if [ -z "${UPLINK_IFACE:-}" ]; then UPLINK_IFACE="$(ip -o route get 1.1.1.1 2>/dev/null | awk \'{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}\')"; fi',
+                    (
+                        f'if command -v iptables >/dev/null 2>&1 && [ -n "${{UPLINK_IFACE:-}}" ]; then '
+                        f'while iptables -t nat -C POSTROUTING -s {quoted_subnet} -o "$UPLINK_IFACE" -j MASQUERADE >/dev/null 2>&1; do '
+                        f'iptables -t nat -D POSTROUTING -s {quoted_subnet} -o "$UPLINK_IFACE" -j MASQUERADE >/dev/null 2>&1 || break; '
+                        "done; fi"
+                    ),
+                    (
+                        f'if command -v iptables >/dev/null 2>&1 && [ -n "${{UPLINK_IFACE:-}}" ]; then '
+                        f'while iptables -C FORWARD -i {quoted_iface} -o "$UPLINK_IFACE" -s {quoted_subnet} -j ACCEPT >/dev/null 2>&1; do '
+                        f'iptables -D FORWARD -i {quoted_iface} -o "$UPLINK_IFACE" -s {quoted_subnet} -j ACCEPT >/dev/null 2>&1 || break; '
+                        "done; fi"
+                    ),
+                    (
+                        f'if command -v iptables >/dev/null 2>&1 && [ -n "${{UPLINK_IFACE:-}}" ]; then '
+                        f'while iptables -C FORWARD -o {quoted_iface} -i "$UPLINK_IFACE" -d {quoted_subnet} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1; do '
+                        f'iptables -D FORWARD -o {quoted_iface} -i "$UPLINK_IFACE" -d {quoted_subnet} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 || break; '
+                        "done; fi"
+                    ),
+                ]
+            )
+        for table_id in table_ids:
+            cleanup_steps.append(
+                f'while ip rule show | grep -Fq "lookup {table_id}"; do ip rule del priority {self._selective_rule_priority(table_id)} fwmark {table_id} table {table_id} || ip rule del fwmark {table_id} table {table_id} || break; done'
+            )
+
+        if not self._is_selective_proxy_routing(topology):
+            result = await self.ssh.run_command(
+                host=proxy_server.host,
+                username=proxy_server.ssh_user,
+                port=proxy_server.ssh_port,
+                password=password,
+                private_key=private_key,
+                command=wrap_with_optional_sudo(" && ".join(cleanup_steps), sudo_password),
+                timeout_seconds=SSH_APPLY_TIMEOUT_SECONDS,
+            )
+            if result.exit_status != 0:
+                raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to clean up selective routing state")
+            return
+
+        route_content = self._load_selective_routes_content()
+        await self.ssh.upload_text_file(
+            host=proxy_server.host,
+            username=proxy_server.ssh_user,
+            port=proxy_server.ssh_port,
+            password=password,
+            private_key=private_key,
+            remote_path="/tmp/awg-selective-routes.txt",
+            content=route_content,
+        )
+
+        ordered_proxy_configs = sorted(
+            proxy_configs,
+            key=lambda item: (
+                1 if item.metadata and item.metadata.get("proxy_policy_default_subnet") == "1" else 0,
+                int(item.metadata.get("proxy_service_table_id") or "0") if item.metadata else 0,
+            ),
+        )
+        apply_steps = [
+            "set -e",
+            *cleanup_steps,
+            "mkdir -p /var/lib/awg-panel",
+            f"mv /tmp/awg-selective-routes.txt {shlex.quote(SELECTIVE_ROUTES_REMOTE_PATH)}",
+            "command -v iptables >/dev/null 2>&1 || { echo \"iptables is required for selective proxy routing\" >&2; exit 45; }",
+            *ensure_ipset_steps,
+            "modprobe ip_set >/dev/null 2>&1 || true",
+            "modprobe xt_set >/dev/null 2>&1 || true",
+            f"ipset create {SELECTIVE_ROUTESET_NAME} hash:net family inet -exist",
+            f"ipset flush {SELECTIVE_ROUTESET_NAME}",
+            f"while read -r ROUTE; do [ -n \"$ROUTE\" ] || continue; ipset add {SELECTIVE_ROUTESET_NAME} \"$ROUTE\" -exist; done < {shlex.quote(SELECTIVE_ROUTES_REMOTE_PATH)}",
+            f"iptables -t mangle -N {SELECTIVE_CHAIN_NAME} 2>/dev/null || true",
+            f"iptables -t mangle -F {SELECTIVE_CHAIN_NAME}",
+            f"iptables -t mangle -C PREROUTING -j {SELECTIVE_CHAIN_NAME} 2>/dev/null || iptables -t mangle -A PREROUTING -j {SELECTIVE_CHAIN_NAME}",
+        ]
+        for item in ordered_proxy_configs:
+            metadata = item.metadata or {}
+            table_id = metadata.get("proxy_service_table_id")
+            if not table_id:
+                continue
+            apply_steps.append(
+                f"ip rule add priority {self._selective_rule_priority(table_id)} fwmark {shlex.quote(table_id)} table {shlex.quote(table_id)} 2>/dev/null || true"
+            )
+            raw_sources = metadata.get("proxy_policy_sources_json") or "[]"
+            try:
+                sources = json.loads(raw_sources)
+            except json.JSONDecodeError:
+                sources = []
+            if metadata.get("proxy_policy_default_subnet") == "1" and proxy_subnet:
+                sources = list(sources) + [proxy_subnet]
+            for source in sources:
+                if not isinstance(source, str) or not source.strip():
+                    continue
+                apply_steps.append(
+                    f"iptables -t mangle -A {SELECTIVE_CHAIN_NAME} -s {shlex.quote(source.strip())} -m set --match-set {SELECTIVE_ROUTESET_NAME} dst -m mark --mark 0x0/0xffffffff -j MARK --set-mark {shlex.quote(table_id)}"
+                )
+        if proxy_subnet:
+            quoted_subnet = shlex.quote(proxy_subnet)
+            quoted_iface = shlex.quote(proxy_client_interface)
+            apply_steps.extend(
+                [
+                    'UPLINK_IFACE="$(ip route show default 2>/dev/null | awk \'/default/ {print $5; exit}\')"',
+                    'if [ -z "${UPLINK_IFACE:-}" ]; then UPLINK_IFACE="$(ip -o route get 1.1.1.1 2>/dev/null | awk \'{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}\')"; fi',
+                    (
+                        f'if [ -n "${{UPLINK_IFACE:-}}" ]; then '
+                        f'iptables -t nat -C POSTROUTING -s {quoted_subnet} -o "$UPLINK_IFACE" -j MASQUERADE 2>/dev/null || '
+                        f'iptables -t nat -A POSTROUTING -s {quoted_subnet} -o "$UPLINK_IFACE" -j MASQUERADE; fi'
+                    ),
+                    (
+                        f'if [ -n "${{UPLINK_IFACE:-}}" ]; then '
+                        f'iptables -C FORWARD -i {quoted_iface} -o "$UPLINK_IFACE" -s {quoted_subnet} -j ACCEPT 2>/dev/null || '
+                        f'iptables -A FORWARD -i {quoted_iface} -o "$UPLINK_IFACE" -s {quoted_subnet} -j ACCEPT; fi'
+                    ),
+                    (
+                        f'if [ -n "${{UPLINK_IFACE:-}}" ]; then '
+                        f'iptables -C FORWARD -o {quoted_iface} -i "$UPLINK_IFACE" -d {quoted_subnet} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || '
+                        f'iptables -A FORWARD -o {quoted_iface} -i "$UPLINK_IFACE" -d {quoted_subnet} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; fi'
+                    ),
+                ]
+            )
+
+        result = await self.ssh.run_command(
+            host=proxy_server.host,
+            username=proxy_server.ssh_user,
+            port=proxy_server.ssh_port,
+            password=password,
+            private_key=private_key,
+            command=wrap_with_optional_sudo(" && ".join(apply_steps), sudo_password),
+            timeout_seconds=SSH_APPLY_TIMEOUT_SECONDS,
+        )
+        if result.exit_status != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to apply selective proxy routing")
 
     def _build_native_autostart_commands(self, config: RenderedConfig) -> list[str]:
         interface = shlex.quote(config.interface_name)
@@ -537,6 +778,7 @@ class TopologyDeployer:
         table_id = proxy_config.metadata.get("proxy_service_table_id") if proxy_config.metadata else None
         if not table_id:
             raise RuntimeError("Proxy-exit verification failed: proxy service table id is missing")
+        selective_mode = proxy_config.metadata.get("proxy_routing_mode") == "selective_via_exit" if proxy_config.metadata else False
         default_subnet_rule = proxy_config.metadata.get("proxy_policy_default_subnet") == "1" if proxy_config.metadata else False
         source_rules_raw = proxy_config.metadata.get("proxy_policy_sources_json") if proxy_config.metadata else None
         try:
@@ -555,16 +797,26 @@ class TopologyDeployer:
             proxy_peer_check = f"docker exec {shlex.quote(proxy_container)} sh -lc {shlex.quote(proxy_peer_check)}"
 
         proxy_verify_lines = ["set -eu"]
-        if default_subnet_rule:
-            proxy_verify_lines.append(
-                f'ip rule show | grep -F "from {subnet} lookup {table_id}" >/dev/null || {{ echo "Missing ip rule from {subnet} lookup {table_id} on proxy" >&2; exit 40; }}'
+        if selective_mode:
+            proxy_verify_lines.extend(
+                [
+                    f'ip rule show | grep -F "lookup {table_id}" >/dev/null || {{ echo "Missing fwmark rule for table {table_id} on proxy" >&2; exit 40; }}',
+                    f'ipset list {SELECTIVE_ROUTESET_NAME} >/dev/null 2>&1 || {{ echo "Missing selective route ipset on proxy" >&2; exit 40; }}',
+                    f'iptables -t mangle -S PREROUTING | grep -F -- "-j {SELECTIVE_CHAIN_NAME}" >/dev/null || {{ echo "Missing PREROUTING hook for selective chain on proxy" >&2; exit 40; }}',
+                    f'iptables -t mangle -S {SELECTIVE_CHAIN_NAME} >/dev/null 2>&1 || {{ echo "Missing selective mangle chain on proxy" >&2; exit 40; }}',
+                ]
             )
-        for source in source_rules:
-            if not isinstance(source, str) or not source.strip():
-                continue
-            proxy_verify_lines.append(
-                f'ip rule show | grep -F "from {source.strip()} lookup {table_id}" >/dev/null || {{ echo "Missing ip rule from {source.strip()} lookup {table_id} on proxy" >&2; exit 40; }}'
-            )
+        else:
+            if default_subnet_rule:
+                proxy_verify_lines.append(
+                    f'ip rule show | grep -F "from {subnet} lookup {table_id}" >/dev/null || {{ echo "Missing ip rule from {subnet} lookup {table_id} on proxy" >&2; exit 40; }}'
+                )
+            for source in source_rules:
+                if not isinstance(source, str) or not source.strip():
+                    continue
+                proxy_verify_lines.append(
+                    f'ip rule show | grep -F "from {source.strip()} lookup {table_id}" >/dev/null || {{ echo "Missing ip rule from {source.strip()} lookup {table_id} on proxy" >&2; exit 40; }}'
+                )
         proxy_verify_lines.extend(
             [
                 f'ip route show table {shlex.quote(table_id)} | grep -F "default dev {proxy_config.interface_name}" >/dev/null || {{ echo "Missing default route via {proxy_config.interface_name} in table {table_id} on proxy" >&2; exit 41; }}',
@@ -825,6 +1077,7 @@ class TopologyDeployer:
             exit_configs = [item for item in rendered if item.metadata and item.metadata.get("proxy_exit_role") == "exit"]
             if not proxy_configs or not exit_configs or len(proxy_configs) != len(exit_configs):
                 raise RuntimeError("Proxy topology verification failed: rendered proxy/exit configs are incomplete")
+            await self._apply_proxy_selective_runtime(topology, proxy_server, proxy_configs)
             proxy_subnet = proxy_configs[0].metadata.get("proxy_client_subnet") if proxy_configs[0].metadata else None
             if not proxy_subnet:
                 raise RuntimeError("Proxy topology deploy failed: proxy client subnet is missing")

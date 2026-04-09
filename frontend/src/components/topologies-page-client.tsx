@@ -123,12 +123,12 @@ function stringifyFailoverConfig(config: FailoverForm): string {
   return JSON.stringify(config);
 }
 
-function parseTopologyMetadata(raw: string | null): { awg_profile_name?: string } {
+function parseTopologyMetadata(raw: string | null): { awg_profile_name?: string; proxy_routing_mode?: string } {
   if (!raw) {
     return {};
   }
   try {
-    const parsed = JSON.parse(raw) as { awg_profile_name?: string };
+    const parsed = JSON.parse(raw) as { awg_profile_name?: string; proxy_routing_mode?: string };
     return typeof parsed === "object" && parsed ? parsed : {};
   } catch {
     return {};
@@ -147,6 +147,7 @@ export function TopologiesPageClient() {
   const [editorName, setEditorName] = useState("");
   const [editorType, setEditorType] = useState("standard");
   const [editorAwgProfile, setEditorAwgProfile] = useState("compatible");
+  const [editorProxyRoutingMode, setEditorProxyRoutingMode] = useState("all_via_exit");
   const [failoverForm, setFailoverForm] = useState<FailoverForm>(DEFAULT_FAILOVER);
   const [standardServerId, setStandardServerId] = useState("");
   const [proxyServerId, setProxyServerId] = useState("");
@@ -177,6 +178,7 @@ export function TopologiesPageClient() {
           name: "Имя",
           type: "Тип topology",
           awgProfile: "AWG-профиль",
+          proxyRoutingMode: "Режим маршрутизации proxy",
           standardServer: "Основной сервер",
           proxyServer: "Входной proxy",
           exitServer: "Exit сервер",
@@ -199,6 +201,9 @@ export function TopologiesPageClient() {
         },
         profiles: {
           compatible: "compatible"
+        ,
+          allViaExit: "всё через exit",
+          selectiveViaExit: "только список через exit, остальное через proxy"
         },
         actions: {
           saveTopology: "Сохранить topology",
@@ -216,7 +221,9 @@ export function TopologiesPageClient() {
           typeChange:
             "При смене типа панель старается сохранить совместимые узлы и приводит роли к новому сценарию. Если что-то лишнее, вы увидите это на шаге проверки.",
           awgProfile:
-            "Профиль обфускации задаётся на уровне topology. После его смены нужно заново применить topology, чтобы сервер и generated-клиенты получили новые параметры.",
+            "Сейчас доступен только один совместимый профиль. Полное переключение профилей появится после поддержки протоколов Amnezia 2.0 в панели.",
+          proxyRoutingMode:
+            "Сейчас список статичный: Telegram, Google, Netflix, OpenAI, Twitter/X и Discord идут через exit, остальное через proxy. Дальше планируется динамическое формирование и обновление списков.",
           failover:
             "Эти настройки использует локальный агент на proxy. Он сам проверяет доступность exit и переключает маршрут даже если панель недоступна. Для большинства сценариев подходят значения 3 / 10 / 3 / 2.",
           defaultExit:
@@ -266,6 +273,7 @@ export function TopologiesPageClient() {
           name: "Name",
           type: "Topology type",
           awgProfile: "AWG profile",
+          proxyRoutingMode: "Proxy routing mode",
           standardServer: "Primary server",
           proxyServer: "Ingress proxy",
           exitServer: "Exit server",
@@ -288,6 +296,9 @@ export function TopologiesPageClient() {
         },
         profiles: {
           compatible: "compatible"
+        ,
+          allViaExit: "all via exit",
+          selectiveViaExit: "route-list via exit, everything else via proxy"
         },
         actions: {
           saveTopology: "Save topology",
@@ -305,7 +316,9 @@ export function TopologiesPageClient() {
           typeChange:
             "When you change the topology type, the panel keeps compatible nodes and adjusts roles to the new scenario where possible.",
           awgProfile:
-            "Obfuscation profile is configured on topology level. Re-deploy the topology after changing it so the server and generated clients receive updated parameters.",
+            "Only one compatible profile is currently available. Full profile switching will be enabled after Amnezia 2.0 protocol support lands in the panel.",
+          proxyRoutingMode:
+            "The list is static for now: Telegram, Google, Netflix, OpenAI, Twitter/X, and Discord go through exit, while the rest uses the proxy uplink. Dynamic list generation and updates are planned next.",
           failover:
             "These settings are used by the local agent on the proxy. It checks exit health and switches routes even if the panel is unavailable. Safe defaults for most setups are 3 / 10 / 3 / 2.",
           defaultExit:
@@ -463,6 +476,7 @@ export function TopologiesPageClient() {
       setEditorName("");
       setEditorType("standard");
       setEditorAwgProfile("compatible");
+      setEditorProxyRoutingMode("all_via_exit");
       setFailoverForm(DEFAULT_FAILOVER);
       setStandardServerId("");
       setProxyServerId("");
@@ -472,7 +486,9 @@ export function TopologiesPageClient() {
 
     setEditorName(selectedTopology.name);
     setEditorType(selectedTopology.type);
-    setEditorAwgProfile(parseTopologyMetadata(selectedTopology.metadata_json).awg_profile_name ?? "compatible");
+    const parsedMetadata = parseTopologyMetadata(selectedTopology.metadata_json);
+    setEditorAwgProfile(parsedMetadata.awg_profile_name ?? "compatible");
+    setEditorProxyRoutingMode(parsedMetadata.proxy_routing_mode ?? "all_via_exit");
     setFailoverForm(parseFailoverConfig(selectedTopology.failover_config_json));
 
     const standardNode = selectedNodes.find((node) => node.role === "standard-vpn");
@@ -515,7 +531,7 @@ export function TopologiesPageClient() {
           name: createForm.name,
           type: createForm.type,
           failover_config_json: stringifyFailoverConfig(DEFAULT_FAILOVER),
-          metadata_json: JSON.stringify({ awg_profile_name: "compatible" })
+          metadata_json: JSON.stringify({ awg_profile_name: "compatible", proxy_routing_mode: "all_via_exit" })
         }
       });
       setCreateForm(initialCreateForm);
@@ -541,7 +557,7 @@ export function TopologiesPageClient() {
           name: editorName,
           default_exit_server_id: null,
           failover_config_json: stringifyFailoverConfig(failoverForm),
-          metadata_json: JSON.stringify({ awg_profile_name: editorAwgProfile })
+          metadata_json: JSON.stringify({ awg_profile_name: editorAwgProfile, proxy_routing_mode: editorProxyRoutingMode })
         }
       });
       await loadData();
@@ -965,6 +981,9 @@ export function TopologiesPageClient() {
                 </div>
                 <p>{copy.helper.typeChange}</p>
                 <div className="info-box">{copy.helper.awgProfile}</div>
+                {(editorType === "proxy-exit" || editorType === "proxy-multi-exit") ? (
+                  <div className="info-box">{copy.helper.proxyRoutingMode}</div>
+                ) : null}
                 <div className="form-grid compact-form-grid">
                   <label className="field">
                     <span>{copy.fields.name}</span>
@@ -984,6 +1003,15 @@ export function TopologiesPageClient() {
                       <option value="compatible">{copy.profiles.compatible}</option>
                     </select>
                   </label>
+                  {(editorType === "proxy-exit" || editorType === "proxy-multi-exit") ? (
+                    <label className="field">
+                      <span>{copy.fields.proxyRoutingMode}</span>
+                      <select value={editorProxyRoutingMode} onChange={(event) => setEditorProxyRoutingMode(event.target.value)}>
+                        <option value="all_via_exit">{copy.profiles.allViaExit}</option>
+                        <option value="selective_via_exit">{copy.profiles.selectiveViaExit}</option>
+                      </select>
+                    </label>
+                  ) : null}
                 </div>
                 <div className="topology-type-card">
                   <strong>

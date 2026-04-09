@@ -102,6 +102,29 @@
 - Service peer is injected into the exit live config without replacing existing normal exit peers.
 - Proxy-side policy routing now uses a dedicated table per exit priority.
 - Validation now blocks `proxy + 1 exit` if the chosen exit already has peer `AllowedIPs` overlapping the proxy client subnet.
+- Proxy topology editor now exposes proxy routing mode:
+  - `all via exit`
+  - `selective via exit`
+- Selective routing is implemented for:
+  - `proxy + 1 exit`
+  - `proxy + multi-exit`
+- Current selective route source is the static file:
+  - `backend/routip/routes.txt`
+- Current selective route set covers:
+  - Telegram
+  - Google
+  - Netflix
+  - OpenAI
+  - Twitter/X
+  - Discord
+- Selective runtime on proxy now manages:
+  - `ipset`
+  - `iptables mangle` marking
+  - per-exit routing tables
+- Proxy failover agent is now selective-aware:
+  - it no longer reintroduces conflicting source-based `ip rule`
+  - it restarts cleanly on reinstall
+  - in `multi-exit` it can rebuild default selective path for the active exit
 
 ### UI
 
@@ -109,6 +132,10 @@
 - `Dashboard` label replaces `Home`.
 - `Delivery methods` label replaces `Integrations`.
 - Logout moved out of sidebar into the content topbar.
+- Topology helper copy now reflects current reality:
+  - only one compatible AWG profile is exposed
+  - full profile switching waits for Amnezia 2.0 protocol support
+  - selective-routing helper now describes the current static route list
 
 ### Backups
 
@@ -212,6 +239,8 @@
 - Ensure proxy-side stale `MASQUERADE` rules are always removed during topology re-apply, including old manual or legacy leftovers.
 - Add an automatic cleanup/migration path for existing broken `proxy + 1 exit` deployments where service peer was previously written into proxy `awg0`.
 - Add end-to-end verification that a managed client created on proxy really exits with the selected exit node public IP.
+- Add dynamic route-list generation and refresh for selective routing instead of the current static `backend/routip/routes.txt`.
+- Add UI/state for advanced selective categories and future BGP-fed route groups.
 
 ### Per-Server Agent
 
@@ -226,6 +255,7 @@
   - `expires_at`
   - quiet hours
   - reconnect sync back into panel state
+- Decide whether selective route-list refresh should later move into the agent for local reconcile.
 
 ## Later
 
