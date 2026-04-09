@@ -171,6 +171,7 @@
   - reloads nginx
   - requests or renews Let's Encrypt certificate in `HTTPS` mode
 - HTTP requests sent to server IP or unknown host are redirected to the configured canonical domain
+- Panel web exposure is now a first-class path, no longer just a side setting under delivery/integrations
 
 ### Security
 
@@ -284,9 +285,16 @@
 - Finish moving remaining read-only SSH checks to agent handlers where safe.
 - Decide which write paths may later move to agent and which must stay SSH-only.
 - Add clearer agent status / task history UI in the server card or dedicated page.
+- Formalize the agent mode switch:
+  - without a public agent-facing panel page, agent works through local files and SSH-driven exchange
+  - with a public agent-facing panel page, the same agent switches to API sync mode
+- Define the first web-agent contract:
+  - status heartbeat
+  - result upload
+  - allowlisted task fetch
+  - authenticated panel-to-agent and agent-to-panel flow
 - Add explicit agent-side policy event journal and surface it in the UI.
 - Add conflict-resolution rules for offline-collected counters and server-side task results.
-- Add optional public-web sync mode after panel gets a stable external URL.
 - Harden and validate offline client-policy enforcement:
   - rolling traffic limits
   - `expires_at`
@@ -329,7 +337,7 @@
   - or on the host namespace
 - Add UI controls for speed policy in the client settings modal.
 
-### Web Exposure And Hardening
+### Web Runtime And Hardening
 
 - Replace current dev-style panel runtime with proper production frontend/backend start.
 - Harden current `Web / HTTPS` apply flow and error reporting.

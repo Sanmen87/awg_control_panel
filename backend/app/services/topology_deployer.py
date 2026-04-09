@@ -15,7 +15,7 @@ from app.models.topology_node import TopologyNode, TopologyNodeRole
 from app.services.bootstrap_commands import wrap_with_optional_sudo
 from app.services.proxy_failover_agent import ProxyFailoverAgentService
 from app.services.server_credentials import ServerCredentialsService
-from app.services.server_runtime_paths import get_docker_container, parse_runtime_details
+from app.services.server_runtime_paths import get_config_path, get_docker_container, parse_runtime_details
 from app.services.ssh import SSHService
 from app.services.standard_config_adopter import StandardConfigAdopter
 from app.services.topology_renderer import RenderedConfig, TopologyRenderer
@@ -906,16 +906,12 @@ class TopologyDeployer:
 
             standard_server = servers_by_id[standard_node.server_id]
             if standard_server.config_source == "imported":
-                runtime_details = {}
-                if standard_server.live_runtime_details_json:
-                    try:
-                        runtime_details = json.loads(standard_server.live_runtime_details_json)
-                    except json.JSONDecodeError:
-                        runtime_details = {}
+                runtime_details = parse_runtime_details(standard_server)
                 live_config = runtime_details.get("config_preview") or ""
                 if not isinstance(live_config, str) or not live_config.strip():
                     raise RuntimeError("Imported standard topology is missing live wg0.conf content")
-                if not standard_server.live_config_path:
+                live_config_path = get_config_path(standard_server, runtime_details)
+                if not live_config_path:
                     raise RuntimeError("Imported standard topology is missing config path")
                 topology_clients = [
                     client
@@ -937,7 +933,7 @@ class TopologyDeployer:
                     RenderedConfig(
                         server_id=standard_server.id,
                         interface_name=standard_server.live_interface_name or "wg0",
-                        remote_path=standard_server.live_config_path,
+                        remote_path=live_config_path,
                         content=merged_content,
                     )
                 ]
@@ -986,15 +982,10 @@ class TopologyDeployer:
             )
 
             proxy_server = servers_by_id[proxy_node.server_id]
-            proxy_runtime = {}
-            if getattr(proxy_server, "live_runtime_details_json", None):
-                try:
-                    proxy_runtime = json.loads(proxy_server.live_runtime_details_json)
-                except json.JSONDecodeError:
-                    proxy_runtime = {}
+            proxy_runtime = parse_runtime_details(proxy_server)
             proxy_live_config = proxy_runtime.get("config_preview") if isinstance(proxy_runtime, dict) else None
             proxy_live_interface = getattr(proxy_server, "live_interface_name", None) or "awg0"
-            proxy_live_config_path = getattr(proxy_server, "live_config_path", None)
+            proxy_live_config_path = get_config_path(proxy_server, proxy_runtime)
             if (
                 isinstance(proxy_live_config, str)
                 and "# service-exit-peer" in proxy_live_config
