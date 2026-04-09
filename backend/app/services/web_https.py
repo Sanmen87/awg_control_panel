@@ -400,6 +400,14 @@ class WebHttpsApplyService:
         if len(status_line) < 2 or not status_line[1].isdigit():
             raise RuntimeError(f"{error_prefix}: malformed response from Docker API")
         status_code = int(status_line[1])
+        headers: dict[str, str] = {}
+        for line in header_lines[1:]:
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            headers[key.strip().lower()] = value.strip().lower()
+        if headers.get("transfer-encoding") == "chunked":
+            body_bytes = self._decode_chunked_body(body_bytes, error_prefix)
         if status_code not in expected_statuses:
             detail = body_bytes.decode("utf-8", errors="replace").strip()
             raise RuntimeError(f"{error_prefix}: {detail or f'Docker API status {status_code}'}")
@@ -409,3 +417,26 @@ class WebHttpsApplyService:
             return json.loads(body_bytes.decode("utf-8"))
         except json.JSONDecodeError:
             return body_bytes.decode("utf-8", errors="replace")
+
+    def _decode_chunked_body(self, payload: bytes, error_prefix: str) -> bytes:
+        decoded = bytearray()
+        index = 0
+        total = len(payload)
+        while index < total:
+            line_end = payload.find(b"\r\n", index)
+            if line_end == -1:
+                raise RuntimeError(f"{error_prefix}: malformed chunked Docker API response")
+            size_line = payload[index:line_end].decode("utf-8", errors="replace").strip()
+            try:
+                chunk_size = int(size_line.split(";", 1)[0], 16)
+            except ValueError as exc:
+                raise RuntimeError(f"{error_prefix}: malformed chunk size in Docker API response") from exc
+            index = line_end + 2
+            if chunk_size == 0:
+                break
+            chunk = payload[index:index + chunk_size]
+            if len(chunk) != chunk_size:
+                raise RuntimeError(f"{error_prefix}: incomplete chunked Docker API response")
+            decoded.extend(chunk)
+            index += chunk_size + 2
+        return bytes(decoded)
