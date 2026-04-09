@@ -10,7 +10,7 @@ branch_labels = None
 depends_on = None
 
 
-client_source = sa.Enum("generated", "imported", name="client_source")
+client_source = sa.Enum("generated", "imported", name="client_source", create_type=False)
 
 
 def upgrade() -> None:

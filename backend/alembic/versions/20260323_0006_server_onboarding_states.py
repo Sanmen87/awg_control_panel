@@ -10,8 +10,8 @@ branch_labels = None
 depends_on = None
 
 
-access_status = sa.Enum("pending", "ok", "failed", name="access_status")
-awg_status = sa.Enum("unknown", "detected", "missing", name="awg_status")
+access_status = sa.Enum("pending", "ok", "failed", name="access_status", create_type=False)
+awg_status = sa.Enum("unknown", "detected", "missing", name="awg_status", create_type=False)
 
 
 def upgrade() -> None:

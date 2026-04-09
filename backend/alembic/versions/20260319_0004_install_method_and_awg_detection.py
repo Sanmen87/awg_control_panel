@@ -10,7 +10,7 @@ branch_labels = None
 depends_on = None
 
 
-install_method = sa.Enum("native", "docker", "custom", name="install_method")
+install_method = sa.Enum("native", "docker", "custom", name="install_method", create_type=False)
 
 
 def upgrade() -> None:

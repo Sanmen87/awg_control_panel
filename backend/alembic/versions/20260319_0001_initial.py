@@ -10,10 +10,10 @@ branch_labels = None
 depends_on = None
 
 
-server_role = sa.Enum("standard-vpn", "proxy", "exit", "proxy-secondary", name="server_role")
-server_status = sa.Enum("new", "healthy", "degraded", "error", name="server_status")
-topology_type = sa.Enum("standard", "proxy-exit", "proxy-multi-exit", name="topology_type")
-topology_status = sa.Enum("draft", "pending", "applied", "error", name="topology_status")
+server_role = sa.Enum("standard-vpn", "proxy", "exit", "proxy-secondary", name="server_role", create_type=False)
+server_status = sa.Enum("new", "healthy", "degraded", "error", name="server_status", create_type=False)
+topology_type = sa.Enum("standard", "proxy-exit", "proxy-multi-exit", name="topology_type", create_type=False)
+topology_status = sa.Enum("draft", "pending", "applied", "error", name="topology_status", create_type=False)
 
 
 def upgrade() -> None:
@@ -78,4 +78,3 @@ def downgrade() -> None:
     topology_type.drop(bind, checkfirst=True)
     server_status.drop(bind, checkfirst=True)
     server_role.drop(bind, checkfirst=True)
-
