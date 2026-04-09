@@ -34,6 +34,13 @@ class BackupSettingsPayload:
     backup_retention_days: int = 14
 
 
+@dataclass
+class WebSettingsPayload:
+    public_domain: str | None = None
+    admin_email: str | None = None
+    web_mode: str = "http"
+
+
 class AppSettingsService:
     NOTIFICATION_LEVEL_ALIASES: dict[str, str] = {
         "delivery_only": "important_only",
@@ -65,6 +72,11 @@ class AppSettingsService:
         "backup_retention_days": False,
         "last_auto_backup_date": False,
         "last_backup_cleanup_date": False,
+    }
+    WEB_KEYS: dict[str, bool] = {
+        "web_public_domain": False,
+        "web_admin_email": False,
+        "web_mode": False,
     }
 
     def _get_setting(self, db: Session, key: str) -> AppSetting | None:
@@ -150,6 +162,37 @@ class AppSettingsService:
             db.add(setting)
         db.commit()
         return self.get_backup_settings(db)
+
+    def get_web_settings(self, db: Session) -> WebSettingsPayload:
+        values = {key: self._get_value(self._get_setting(db, key)) for key in self.WEB_KEYS}
+        mode = (values["web_mode"] or "http").strip().lower()
+        if mode not in {"http", "https"}:
+            mode = "http"
+        return WebSettingsPayload(
+            public_domain=(values["web_public_domain"] or "").strip() or None,
+            admin_email=(values["web_admin_email"] or "").strip() or None,
+            web_mode=mode,
+        )
+
+    def update_web_settings(self, db: Session, payload: WebSettingsPayload) -> WebSettingsPayload:
+        payload.public_domain = (payload.public_domain or "").strip() or None
+        payload.admin_email = (payload.admin_email or "").strip() or None
+        payload.web_mode = (payload.web_mode or "http").strip().lower()
+        if payload.web_mode not in {"http", "https"}:
+            payload.web_mode = "http"
+        mapping = {
+            "web_public_domain": payload.public_domain,
+            "web_admin_email": payload.admin_email,
+            "web_mode": payload.web_mode,
+        }
+        for key in self.WEB_KEYS:
+            setting = self._get_setting(db, key) or AppSetting(key=key, is_encrypted=False)
+            value = mapping[key]
+            setting.value_text = value
+            setting.is_encrypted = False
+            db.add(setting)
+        db.commit()
+        return self.get_web_settings(db)
 
     def get_raw_backup_marker(self, db: Session, key: str) -> str | None:
         return self._get_value(self._get_setting(db, key))

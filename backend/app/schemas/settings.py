@@ -54,3 +54,28 @@ class BackupSettingsUpdate(BaseModel):
     auto_backup_enabled: bool
     auto_backup_hour_utc: int
     backup_retention_days: int
+
+
+class WebSettingsRead(BaseModel):
+    public_domain: str | None = None
+    admin_email: str | None = None
+    web_mode: str = "http"
+    generated_nginx_config: str
+
+
+class WebSettingsUpdate(BaseModel):
+    public_domain: str | None = None
+    admin_email: str | None = None
+    web_mode: str = "http"
+
+
+class WebStatusRead(BaseModel):
+    public_domain: str | None = None
+    web_mode: str = "http"
+    dns_ok: bool = False
+    resolved_ips: list[str] = []
+    port_80_open: bool = False
+    port_443_open: bool = False
+    certificate_present: bool = False
+    certificate_expires_at: str | None = None
+    detail: str | None = None

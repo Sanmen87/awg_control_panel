@@ -5,9 +5,19 @@ from app.api.deps import get_current_user
 from app.core.config import settings as app_config
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.settings import BackupSettingsRead, BackupSettingsUpdate, DeliverySettingsRead, DeliverySettingsUpdate, DeliveryTestResult
-from app.services.app_settings import AppSettingsService, BackupSettingsPayload, DeliverySettingsPayload
+from app.schemas.settings import (
+    BackupSettingsRead,
+    BackupSettingsUpdate,
+    DeliverySettingsRead,
+    DeliverySettingsUpdate,
+    DeliveryTestResult,
+    WebSettingsRead,
+    WebSettingsUpdate,
+    WebStatusRead,
+)
+from app.services.app_settings import AppSettingsService, BackupSettingsPayload, DeliverySettingsPayload, WebSettingsPayload
 from app.services.delivery import DeliveryService
+from app.services.web_https import WebHttpsService
 
 router = APIRouter()
 
@@ -113,3 +123,38 @@ def update_backup_settings(
         **updated.__dict__,
         backup_storage_path=app_config.backup_storage_path,
     )
+
+
+@router.get("/web", response_model=WebSettingsRead)
+def get_web_settings(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> WebSettingsRead:
+    payload = AppSettingsService().get_web_settings(db)
+    return WebSettingsRead(**WebHttpsService().build_read_payload(payload))
+
+
+@router.patch("/web", response_model=WebSettingsRead)
+def update_web_settings(
+    update: WebSettingsUpdate,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> WebSettingsRead:
+    payload = AppSettingsService().update_web_settings(
+        db,
+        WebSettingsPayload(
+            public_domain=(update.public_domain or "").strip() or None,
+            admin_email=(update.admin_email or "").strip() or None,
+            web_mode=(update.web_mode or "http").strip().lower(),
+        ),
+    )
+    return WebSettingsRead(**WebHttpsService().build_read_payload(payload))
+
+
+@router.get("/web/status", response_model=WebStatusRead)
+def get_web_status(
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> WebStatusRead:
+    payload = AppSettingsService().get_web_settings(db)
+    return WebHttpsService().get_status(payload)

@@ -18,7 +18,7 @@ services:
     volumes:
       - redis_data:/data
 
-  backend:
+  migrate:
     build:
       context: ./backend
     env_file:
@@ -28,6 +28,19 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+    volumes:
+      - ./backend:/app
+      - ${BACKUP_STORAGE_PATH:-./backups}:/app/backups
+    command: python -m app.bootstrap_db
+
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ./backend:/app
       - ${BACKUP_STORAGE_PATH:-./backups}:/app/backups
@@ -39,10 +52,8 @@ services:
     env_file:
       - .env
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ./backend:/app
       - ${BACKUP_STORAGE_PATH:-./backups}:/app/backups
@@ -54,10 +65,8 @@ services:
     env_file:
       - .env
     depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_started
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - ./backend:/app
       - ${BACKUP_STORAGE_PATH:-./backups}:/app/backups

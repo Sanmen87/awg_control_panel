@@ -178,6 +178,10 @@
     grid-template-columns: 1fr;
   }
 
+  .settings-web-status-grid {
+    grid-template-columns: 1fr;
+  }
+
   .extra-service-form-helper {
     min-height: auto;
   }
