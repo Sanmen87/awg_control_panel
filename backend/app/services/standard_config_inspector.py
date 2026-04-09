@@ -38,6 +38,11 @@ find_awg_container() {
     name=$(docker inspect --format '{{.Name}}' "$cid" 2>/dev/null | sed 's#^/##' || true)
     image=$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null || true)
     mounts=$(docker inspect --format '{{range .Mounts}}{{println .Destination}}{{end}}' "$cid" 2>/dev/null | tr '\n' ' ' || true)
+
+    if printf '%s %s' "$name" "$image" | grep -Ei 'awg_control_panel.+(backend|frontend|worker|scheduler|nginx|redis|db|postgres)' >/dev/null; then
+      continue
+    fi
+
     score=0
 
     if printf '%s %s' "$name" "$image" | grep -Ei '(awg|wireguard)' >/dev/null; then
@@ -56,7 +61,9 @@ find_awg_container() {
       score=$((score + 10))
     fi
 
-    printf '%s|%s|%s\n' "$score" "$name" "$image"
+    if [ "$score" -ge 10 ]; then
+      printf '%s|%s|%s\n' "$score" "$name" "$image"
+    fi
   done | sort -t'|' -k1,1nr | head -n1 | cut -d'|' -f2-3
 }
 

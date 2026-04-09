@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 
 from app.models.server import Server
@@ -15,6 +16,11 @@ DEFAULT_CLIENTS_TABLE_CANDIDATES = [
     "/etc/wireguard/clientsTable",
 ]
 
+PANEL_INFRA_CONTAINER_PATTERN = re.compile(
+    r"awg_control_panel[-_](backend|frontend|worker|scheduler|nginx|redis|db|postgres)([-_]|$)",
+    re.IGNORECASE,
+)
+
 
 def parse_runtime_details(server: Server) -> dict[str, object]:
     if not server.live_runtime_details_json:
@@ -26,11 +32,22 @@ def parse_runtime_details(server: Server) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+def is_panel_infra_container(name: str | None) -> bool:
+    if not isinstance(name, str):
+        return False
+    candidate = name.strip()
+    if not candidate:
+        return False
+    return bool(PANEL_INFRA_CONTAINER_PATTERN.search(candidate))
+
+
 def get_docker_container(server: Server, runtime_details: dict[str, object] | None = None) -> str | None:
     details = runtime_details or parse_runtime_details(server)
     docker_container = details.get("docker_container")
     if server.install_method.value == "docker" and isinstance(docker_container, str) and docker_container.strip():
-        return docker_container.strip()
+        normalized = docker_container.strip()
+        if not is_panel_infra_container(normalized):
+            return normalized
     return None
 
 

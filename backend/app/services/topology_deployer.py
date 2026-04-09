@@ -15,6 +15,7 @@ from app.models.topology_node import TopologyNode, TopologyNodeRole
 from app.services.bootstrap_commands import wrap_with_optional_sudo
 from app.services.proxy_failover_agent import ProxyFailoverAgentService
 from app.services.server_credentials import ServerCredentialsService
+from app.services.server_runtime_paths import get_docker_container, parse_runtime_details
 from app.services.ssh import SSHService
 from app.services.standard_config_adopter import StandardConfigAdopter
 from app.services.topology_renderer import RenderedConfig, TopologyRenderer
@@ -55,14 +56,10 @@ class TopologyDeployer:
         return match.group(1).strip() if match else None
 
     def _docker_container_name(self, server: Server) -> str | None:
-        if server.live_runtime_details_json:
-            try:
-                runtime_details = json.loads(server.live_runtime_details_json)
-            except json.JSONDecodeError:
-                runtime_details = {}
-            docker_container = runtime_details.get("docker_container")
-            if isinstance(docker_container, str) and docker_container.strip():
-                return docker_container.strip()
+        runtime_details = parse_runtime_details(server)
+        docker_container = get_docker_container(server, runtime_details)
+        if docker_container:
+            return docker_container
         if getattr(server.install_method, "value", None) == "docker":
             return "amnezia-awg"
         return None
@@ -527,14 +524,9 @@ class TopologyDeployer:
 
     async def generate_keypair(self, server: Server) -> tuple[str, str]:
         command = KEYPAIR_COMMAND
-        docker_container = None
-        if server.live_runtime_details_json:
-            try:
-                docker_container = json.loads(server.live_runtime_details_json).get("docker_container")
-            except json.JSONDecodeError:
-                docker_container = None
-        if server.install_method.value == "docker" or docker_container:
-            container_name = shlex.quote(str(docker_container or "amnezia-awg"))
+        docker_container = self._docker_container_name(server)
+        if docker_container:
+            container_name = shlex.quote(docker_container)
             command = f"docker exec {container_name} sh -lc {shlex.quote(KEYPAIR_COMMAND)}"
 
         result = await self.ssh.run_command(
@@ -554,18 +546,13 @@ class TopologyDeployer:
         password = self.credentials.get_ssh_password(server)
         private_key = self.credentials.get_private_key(server)
         sudo_password = self.credentials.get_sudo_password(server)
-        docker_container = None
-        if server.live_runtime_details_json:
-            try:
-                docker_container = json.loads(server.live_runtime_details_json).get("docker_container")
-            except json.JSONDecodeError:
-                docker_container = None
+        docker_container = self._docker_container_name(server)
         directory = shlex.quote("/etc/amnezia/amneziawg")
         remote_path = shlex.quote(config.remote_path)
         interface = shlex.quote(config.interface_name)
 
-        if server.install_method.value == "docker" or docker_container:
-            container_name = shlex.quote(str(docker_container or "amnezia-awg"))
+        if docker_container:
+            container_name = shlex.quote(docker_container)
             remote_dir = shlex.quote(str(config.remote_path.rsplit("/", 1)[0] if "/" in config.remote_path else "/opt/amnezia/awg"))
             container_path = shlex.quote(config.remote_path)
             container_interface = shlex.quote(config.interface_name)

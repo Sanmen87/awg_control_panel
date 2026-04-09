@@ -678,9 +678,13 @@ fi''',
             [
                 "sh",
                 "-lc",
-                r'''docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | awk -F'|' '
-/awg|wireguard/ && $0 !~ /dns/ {print $1; exit}
-''',
+                r'''docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | while IFS='|' read -r name image; do
+  printf '%s %s' "$name" "$image" | grep -Ei 'awg_control_panel.+(backend|frontend|worker|scheduler|nginx|redis|db|postgres)' >/dev/null && continue
+  if docker exec "$name" sh -lc 'command -v awg >/dev/null 2>&1 || command -v wg >/dev/null 2>&1 || test -d /opt/amnezia/awg || test -f /opt/amnezia/awg/wg0.conf || test -f /opt/amnezia/awg/clientsTable' >/dev/null 2>&1; then
+    printf '%s' "$name"
+    break
+  fi
+done''',
             ]
         )
         if docker_container:
