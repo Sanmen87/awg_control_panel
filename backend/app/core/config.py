@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     redis_port: int = Field(default=6379, alias="REDIS_PORT")
     backup_storage_path: str = Field(default="/app/backups", alias="BACKUP_STORAGE_PATH")
     panel_public_base_url: str = Field(default="", alias="PANEL_PUBLIC_BASE_URL")
+    compose_project_name: str = Field(default="awg_control_panel", alias="COMPOSE_PROJECT_NAME")
+    web_runtime_nginx_conf_path: str = Field(default="/shared/nginx/default.conf", alias="WEB_RUNTIME_NGINX_CONF_PATH")
+    web_runtime_acme_webroot: str = Field(default="/var/www/certbot", alias="WEB_RUNTIME_ACME_WEBROOT")
+    web_runtime_letsencrypt_path: str = Field(default="/etc/letsencrypt", alias="WEB_RUNTIME_LETSENCRYPT_PATH")
+    auth_login_max_attempts: int = Field(default=5, alias="AUTH_LOGIN_MAX_ATTEMPTS")
+    auth_login_window_seconds: int = Field(default=300, alias="AUTH_LOGIN_WINDOW_SECONDS")
+    auth_login_ban_seconds: int = Field(default=900, alias="AUTH_LOGIN_BAN_SECONDS")
 
     backend_cors_origins_raw: str = Field(
         default="http://localhost:3000",

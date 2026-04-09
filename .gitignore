@@ -10,6 +10,6 @@ node_modules/
 .next/
 dist/
 coverage/
-backups/
+/backups/
 backend/celerybeat-schedule
 backend/celerybeat-schedule.*

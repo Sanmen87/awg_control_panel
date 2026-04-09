@@ -79,3 +79,13 @@ class WebStatusRead(BaseModel):
     certificate_present: bool = False
     certificate_expires_at: str | None = None
     detail: str | None = None
+
+
+class WebApplyResult(BaseModel):
+    public_domain: str | None = None
+    web_mode: str = "http"
+    nginx_reloaded: bool = False
+    certificate_requested: bool = False
+    certificate_present: bool = False
+    certificate_expires_at: str | None = None
+    detail: str

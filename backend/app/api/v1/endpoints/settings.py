@@ -11,13 +11,14 @@ from app.schemas.settings import (
     DeliverySettingsRead,
     DeliverySettingsUpdate,
     DeliveryTestResult,
+    WebApplyResult,
     WebSettingsRead,
     WebSettingsUpdate,
     WebStatusRead,
 )
 from app.services.app_settings import AppSettingsService, BackupSettingsPayload, DeliverySettingsPayload, WebSettingsPayload
 from app.services.delivery import DeliveryService
-from app.services.web_https import WebHttpsService
+from app.services.web_https import WebHttpsApplyService, WebHttpsService
 
 router = APIRouter()
 
@@ -158,3 +159,25 @@ def get_web_status(
 ) -> WebStatusRead:
     payload = AppSettingsService().get_web_settings(db)
     return WebHttpsService().get_status(payload)
+
+
+@router.post("/web/apply", response_model=WebApplyResult)
+def apply_web_settings(
+    update: WebSettingsUpdate,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> WebApplyResult:
+    payload = AppSettingsService().update_web_settings(
+        db,
+        WebSettingsPayload(
+            public_domain=(update.public_domain or "").strip() or None,
+            admin_email=(update.admin_email or "").strip() or None,
+            web_mode=(update.web_mode or "http").strip().lower(),
+        ),
+    )
+    try:
+        return WebHttpsApplyService().apply(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

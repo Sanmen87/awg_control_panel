@@ -44,6 +44,10 @@ services:
     volumes:
       - ./backend:/app
       - ${BACKUP_STORAGE_PATH:-./backups}:/app/backups
+      - ./infra/nginx/generated:/shared/nginx
+      - ./infra/certbot/www:/var/www/certbot
+      - ./infra/certbot/letsencrypt:/etc/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   worker:
@@ -92,8 +96,11 @@ services:
       - backend
     ports:
       - "80:80"
+      - "443:443"
     volumes:
-      - ./infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./infra/nginx/generated/default.conf:/etc/nginx/conf.d/default.conf
+      - ./infra/certbot/www:/var/www/certbot:ro
+      - ./infra/certbot/letsencrypt:/etc/letsencrypt:ro
 
 volumes:
   postgres_data:

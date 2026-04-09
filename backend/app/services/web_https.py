@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import socket
 import ssl
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
+from app.core.config import settings as app_config
+from app.schemas.settings import WebApplyResult
 from app.schemas.settings import WebStatusRead
 from app.services.app_settings import WebSettingsPayload
 
@@ -178,3 +182,136 @@ class WebHttpsService:
         with socket.create_connection((domain, 443), timeout=2.0) as raw_socket:
             with context.wrap_socket(raw_socket, server_hostname=domain) as secure_socket:
                 return secure_socket.getpeercert()
+
+
+class WebHttpsApplyService:
+    def __init__(self) -> None:
+        self.inspect_service = WebHttpsService()
+        self.nginx_conf_path = Path(app_config.web_runtime_nginx_conf_path)
+        self.acme_webroot = Path(app_config.web_runtime_acme_webroot)
+        self.letsencrypt_path = Path(app_config.web_runtime_letsencrypt_path)
+        self.compose_project_name = app_config.compose_project_name
+
+    def apply(self, payload: WebSettingsPayload) -> WebApplyResult:
+        domain = self.inspect_service.normalize_domain(payload.public_domain)
+        mode = (payload.web_mode or "http").strip().lower()
+        if mode not in {"http", "https"}:
+            mode = "http"
+        if not domain:
+            raise ValueError("Public domain is required before applying web settings.")
+
+        if mode == "https" and not (payload.admin_email or "").strip():
+            raise ValueError("Email for Let's Encrypt is required in HTTPS mode.")
+
+        self._ensure_runtime_paths()
+
+        if mode == "https":
+            self._write_nginx_config(self._generate_acme_bootstrap_config(domain))
+            self._reload_nginx()
+            self._run_certbot(domain, (payload.admin_email or "").strip())
+
+        final_payload = WebSettingsPayload(
+            public_domain=domain,
+            admin_email=(payload.admin_email or "").strip() or None,
+            web_mode=mode,
+        )
+        self._write_nginx_config(self.inspect_service.generate_nginx_config(final_payload))
+        self._reload_nginx()
+
+        status = self.inspect_service.get_status(final_payload)
+        return WebApplyResult(
+            public_domain=domain,
+            web_mode=mode,
+            nginx_reloaded=True,
+            certificate_requested=mode == "https",
+            certificate_present=status.certificate_present,
+            certificate_expires_at=status.certificate_expires_at,
+            detail=status.detail or "Web settings applied.",
+        )
+
+    def _ensure_runtime_paths(self) -> None:
+        self.nginx_conf_path.parent.mkdir(parents=True, exist_ok=True)
+        self.acme_webroot.mkdir(parents=True, exist_ok=True)
+        self.letsencrypt_path.mkdir(parents=True, exist_ok=True)
+
+    def _write_nginx_config(self, content: str) -> None:
+        self.nginx_conf_path.write_text(content, encoding="utf-8")
+
+    def _reload_nginx(self) -> None:
+        container_id = self._find_nginx_container_id()
+        if not container_id:
+            raise RuntimeError("Could not find nginx container to reload.")
+        self._run_command(["docker", "kill", "--signal=HUP", container_id], "Failed to reload nginx container")
+
+    def _find_nginx_container_id(self) -> str | None:
+        result = self._run_command(
+            [
+                "docker",
+                "ps",
+                "--filter",
+                f"label=com.docker.compose.project={self.compose_project_name}",
+                "--filter",
+                "label=com.docker.compose.service=nginx",
+                "--format",
+                "{{.ID}}",
+            ],
+            "Failed to query running nginx container",
+        )
+        container_id = result.stdout.strip().splitlines()
+        return container_id[0] if container_id else None
+
+    def _run_certbot(self, domain: str, email: str) -> None:
+        self._run_command(
+            [
+                "certbot",
+                "certonly",
+                "--webroot",
+                "-w",
+                str(self.acme_webroot),
+                "-d",
+                domain,
+                "--email",
+                email,
+                "--agree-tos",
+                "--non-interactive",
+                "--keep-until-expiring",
+            ],
+            "Failed to issue or renew Let's Encrypt certificate",
+        )
+
+    def _generate_acme_bootstrap_config(self, domain: str) -> str:
+        return (
+            "server {\n"
+            "    listen 80;\n"
+            f"    server_name {domain};\n\n"
+            "    client_max_body_size 2m;\n\n"
+            "    location /.well-known/acme-challenge/ {\n"
+            f"        root {self.acme_webroot};\n"
+            "    }\n\n"
+            "    location /api/ {\n"
+            "        proxy_pass http://backend:8000/api/;\n"
+            "        proxy_http_version 1.1;\n"
+            "        proxy_set_header Host $host;\n"
+            "        proxy_set_header X-Real-IP $remote_addr;\n"
+            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+            "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+            "    }\n\n"
+            "    location / {\n"
+            "        proxy_pass http://frontend:3000/;\n"
+            "        proxy_http_version 1.1;\n"
+            "        proxy_set_header Host $host;\n"
+            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+            "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+            "    }\n"
+            "}\n"
+        )
+
+    def _run_command(self, command: list[str], error_prefix: str) -> subprocess.CompletedProcess[str]:
+        try:
+            result = subprocess.run(command, check=False, capture_output=True, text=True)
+        except OSError as exc:
+            raise RuntimeError(f"{error_prefix}: {exc}") from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(f"{error_prefix}: {detail or 'unknown error'}")
+        return result

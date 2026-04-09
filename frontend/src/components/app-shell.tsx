@@ -54,6 +54,7 @@ const navigation = {
         { href: "/servers", label: "Servers" },
         { href: "/topologies", label: "Topologies" },
         { href: "/backups", label: "Backups" },
+        { href: "/web-settings", label: "Web / HTTPS" },
         { href: "/settings", label: "Delivery methods" },
         { href: "/jobs", label: "Jobs" }
       ]
@@ -71,6 +72,7 @@ const navigation = {
         { href: "/servers", label: "Серверы" },
         { href: "/topologies", label: "Топологии" },
         { href: "/backups", label: "Бэкапы" },
+        { href: "/web-settings", label: "Веб-интерфейс" },
         { href: "/settings", label: "Способы доставки" },
         { href: "/jobs", label: "Задачи" }
       ]
@@ -88,6 +90,7 @@ export function AppShell({
   const { locale, setLocale } = useLocale();
   const [settingsOpen, setSettingsOpen] = useState(
     pathname.startsWith("/settings") || pathname.startsWith("/servers") || pathname.startsWith("/backups") || pathname.startsWith("/topologies") || pathname.startsWith("/jobs")
+    || pathname.startsWith("/web-settings")
   );
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const copy = locale === "ru"
@@ -149,7 +152,7 @@ export function AppShell({
                   type="button"
                   className={
                     settingsOpen || pathname.startsWith("/settings") || pathname.startsWith("/servers") || pathname.startsWith("/topologies") || pathname.startsWith("/jobs")
-                    || pathname.startsWith("/backups")
+                    || pathname.startsWith("/backups") || pathname.startsWith("/web-settings")
                       ? "nav-link nav-toggle active"
                       : "nav-link nav-toggle"
                   }
