@@ -203,13 +203,30 @@ docker run -d \
   amnezia-awg
 docker network connect amnezia-dns-net amnezia-awg >/dev/null 2>&1 || true
 sysctl -w net.ipv4.ip_forward=1
-iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -A FORWARD -j DOCKER-USER
-iptables -C FORWARD -j DOCKER-ISOLATION-STAGE-1 2>/dev/null || iptables -A FORWARD -j DOCKER-ISOLATION-STAGE-1
+
+iptables_has_chain() {
+  iptables -nL "$1" >/dev/null 2>&1
+}
+
+iptables -C FORWARD -j DOCKER-USER 2>/dev/null || {
+  if iptables_has_chain DOCKER-USER; then
+    iptables -A FORWARD -j DOCKER-USER
+  fi
+}
+iptables -C FORWARD -j DOCKER-ISOLATION-STAGE-1 2>/dev/null || {
+  if iptables_has_chain DOCKER-ISOLATION-STAGE-1; then
+    iptables -A FORWARD -j DOCKER-ISOLATION-STAGE-1
+  fi
+}
 iptables -C FORWARD -o amn0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -o amn0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 iptables -C FORWARD -i amn0 ! -o amn0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i amn0 ! -o amn0 -j ACCEPT
 iptables -C FORWARD -i amn0 -o amn0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i amn0 -o amn0 -j ACCEPT
 iptables -C FORWARD -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -o docker0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-iptables -C FORWARD -o docker0 -j DOCKER 2>/dev/null || iptables -A FORWARD -o docker0 -j DOCKER
+iptables -C FORWARD -o docker0 -j DOCKER 2>/dev/null || {
+  if iptables_has_chain DOCKER; then
+    iptables -A FORWARD -o docker0 -j DOCKER
+  fi
+}
 iptables -C FORWARD -i docker0 ! -o docker0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i docker0 ! -o docker0 -j ACCEPT
 iptables -C FORWARD -i docker0 -o docker0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i docker0 -o docker0 -j ACCEPT
 echo 'docker bootstrap complete'

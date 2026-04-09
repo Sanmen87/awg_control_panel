@@ -25,6 +25,7 @@ Repository layout:
 - `infra/` - nginx config and deployment assets
 - `agent/` - per-server agent notes and runtime direction
 - `docs/` - project notes and architecture docs
+- `документация/` - operational install notes in Russian
 
 ### Docker services
 
@@ -32,6 +33,7 @@ The local stack uses:
 
 - `db`
 - `redis`
+- `migrate`
 - `backend`
 - `worker`
 - `scheduler`
@@ -51,6 +53,8 @@ Main entrypoints:
 ```bash
 docker compose up --build
 ```
+
+On a fresh machine the stack now runs database migrations through a dedicated one-shot `migrate` service before `backend`, `worker`, and `scheduler` start. This avoids the old initial migration race on an empty PostgreSQL volume.
 
 For rebuild after backend or frontend changes:
 
@@ -203,6 +207,48 @@ Notes:
   - proxy routing mode selector for proxy topologies
   - updated copy for the current single compatible AWG profile
   - updated selective-routing helper text reflecting the current static route list
+- separate sidebar route for `Backups`
+- separate sidebar route for `Web / HTTPS`
+
+#### Web / HTTPS
+
+- separate `Web / HTTPS` page in the sidebar
+- stored settings:
+  - public domain
+  - Let's Encrypt email
+  - HTTP / HTTPS mode
+- live diagnostics:
+  - DNS resolution
+  - port `80`
+  - port `443`
+  - certificate presence and expiry
+- generated nginx config preview in UI
+- apply flow now:
+  - writes runtime nginx config
+  - reloads nginx
+  - in `HTTPS` mode runs `certbot` with `webroot`
+- generated config also adds canonical HTTP redirect from server IP or unknown host to the configured domain
+
+Notes:
+
+- `http://SERVER_IP` can be redirected to the domain
+- `https://SERVER_IP` still cannot be made clean without a certificate for the IP itself
+
+#### Auth Protection
+
+- Redis-backed anti-bruteforce guard on admin login
+- failed login counters by:
+  - client IP
+  - username
+- temporary login ban after repeated failures
+- configurable env settings:
+  - `AUTH_LOGIN_MAX_ATTEMPTS`
+  - `AUTH_LOGIN_WINDOW_SECONDS`
+  - `AUTH_LOGIN_BAN_SECONDS`
+- audit events are written to `audit_logs`:
+  - `auth_login_failed`
+  - `auth_login_banned`
+  - `auth_login_blocked`
 
 #### Backups
 
@@ -386,6 +432,12 @@ Backend creates a default admin from `.env` on startup:
 
 - `DEFAULT_ADMIN_USERNAME`
 - `DEFAULT_ADMIN_PASSWORD`
+
+### Server install
+
+For a step-by-step VPS install guide in Russian see:
+
+- [server_install_ru.md](/home/sarov/projects/awg_control_panel/документация/server_install_ru.md)
 
 ---
 

@@ -994,11 +994,51 @@ def bootstrap_server(job_id: int) -> None:
                 agent = agent_service.ensure_enrolled(db, server)
                 asyncio.run(agent_service.install(server, agent))
         else:
-            job.status = JobStatus.FAILED
-            job.result_message = result.stderr.strip() or result.stdout.strip() or "Bootstrap failed"
-            server.status = ServerStatus.ERROR
-            server.last_error = job.result_message
-            server.ready_for_topology = False
+            detect_result = asyncio.run(
+                SSHService().run_command(
+                    host=server.host,
+                    username=server.ssh_user,
+                    port=server.ssh_port,
+                    password=creds.get_ssh_password(server),
+                    private_key=creds.get_private_key(server),
+                    command=DETECT_AWG_COMMAND,
+                    timeout_seconds=120,
+                )
+            )
+            if detect_result.exit_status == 0:
+                parsed = parse_detection_output(detect_result.stdout)
+                if parsed.detected:
+                    job.status = JobStatus.SUCCEEDED
+                    bootstrap_warning = result.stderr.strip() or result.stdout.strip() or "Bootstrap completed with warnings"
+                    job.result_message = f"Bootstrap completed with warning: {bootstrap_warning}"
+                    server.status = ServerStatus.HEALTHY
+                    server.access_status = AccessStatus.OK
+                    server.awg_status = AWGStatus.DETECTED
+                    server.install_method = InstallMethod(parsed.install_type)
+                    server.runtime_flavor = parsed.runtime_flavor
+                    server.awg_detected = True
+                    server.awg_version = parsed.version
+                    server.os_name = parsed.os_name or server.os_name
+                    server.os_version = parsed.os_version or server.os_version
+                    server.awg_interfaces_json = parsed.interfaces_json
+                    server.ready_for_topology = True
+                    server.last_error = bootstrap_warning
+                    try:
+                        _refresh_server_live_runtime_state(db, server)
+                    except Exception:
+                        pass
+                else:
+                    job.status = JobStatus.FAILED
+                    job.result_message = result.stderr.strip() or result.stdout.strip() or "Bootstrap failed"
+                    server.status = ServerStatus.ERROR
+                    server.last_error = job.result_message
+                    server.ready_for_topology = False
+            else:
+                job.status = JobStatus.FAILED
+                job.result_message = result.stderr.strip() or result.stdout.strip() or "Bootstrap failed"
+                server.status = ServerStatus.ERROR
+                server.last_error = job.result_message
+                server.ready_for_topology = False
         server.last_checked_at = datetime.now(UTC)
         db.add_all([job, server])
         db.commit()

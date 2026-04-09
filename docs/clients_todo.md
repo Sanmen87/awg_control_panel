@@ -131,6 +131,7 @@
 - Sidebar visually split into separate sections.
 - `Dashboard` label replaces `Home`.
 - `Delivery methods` label replaces `Integrations`.
+- `Web / HTTPS` moved into its own sidebar page.
 - Logout moved out of sidebar into the content topbar.
 - Topology helper copy now reflects current reality:
   - only one compatible AWG profile is exposed
@@ -150,6 +151,38 @@
 - Manual bundle-oriented restore flow is available for:
   - panel restore
   - selected server restore
+- dedicated `/backups` route exists in the UI
+
+### Web / HTTPS
+
+- Separate `Web / HTTPS` page in the sidebar.
+- Web settings storage:
+  - public domain
+  - Let's Encrypt email
+  - HTTP / HTTPS mode
+- Web diagnostics in UI:
+  - DNS
+  - port `80`
+  - port `443`
+  - TLS certificate state and expiry
+- nginx config preview in UI
+- Apply action now:
+  - writes runtime nginx config
+  - reloads nginx
+  - requests or renews Let's Encrypt certificate in `HTTPS` mode
+- HTTP requests sent to server IP or unknown host are redirected to the configured canonical domain
+
+### Security
+
+- Built-in anti-bruteforce login guard backed by Redis.
+- Temporary ban after repeated failed logins.
+- Counters keyed by:
+  - source IP
+  - username
+- Security events are written into `audit_logs`:
+  - `auth_login_failed`
+  - `auth_login_banned`
+  - `auth_login_blocked`
 
 ### Extra Services
 
@@ -193,6 +226,11 @@
 - Email template is implemented, but still needs real-client visual review across mail providers.
 - Telegram delivery is operational, but still not as polished as the email package.
 
+### Web Runtime
+
+- Current VPS runtime still uses `next dev` and `uvicorn --reload`.
+- The panel is functionally usable, but production runtime hardening is still pending.
+
 ## Next
 
 ### Notification Engine
@@ -225,7 +263,6 @@
 
 ### Clients And Materials
 
-- Finish validation of the redesigned clients page after frontend dependencies are restored and `next build` becomes available.
 - Tighten table spacing and responsive behavior after real browser review.
 - Review imported-peer messaging and visual differentiation.
 - Add keyboard accessibility for opening and closing client modals.
@@ -257,6 +294,16 @@
   - reconnect sync back into panel state
 - Decide whether selective route-list refresh should later move into the agent for local reconcile.
 
+### Security UI
+
+- Add dedicated frontend page for `audit_logs`.
+- Add filters for brute-force events:
+  - failed logins
+  - bans
+  - blocked retries
+- Add optional whitelist for trusted admin IPs.
+- Decide whether brute-force thresholds should be editable from panel settings.
+
 ## Later
 
 ### Server Install Defects
@@ -284,16 +331,9 @@
 
 ### Web Exposure And Hardening
 
-- Add a simple production web mode so the panel can be published quickly on the same server that hosts the proxy.
-- Provide a standard deployment path with:
-  - `nginx`
-  - TLS
-  - reverse proxy for `frontend` and `backend`
+- Replace current dev-style panel runtime with proper production frontend/backend start.
+- Harden current `Web / HTTPS` apply flow and error reporting.
 - Support a practical "panel on proxy server" deployment profile without breaking AWG routing.
-- Add login protection in the app layer:
-  - rate limiting for auth endpoints
-  - temporary lockout / backoff after repeated failed logins
-  - audit trail for failed and successful admin logins
 - Add host-level brute-force protection:
   - `fail2ban` integration or equivalent
   - parsing of `nginx` / auth-related logs
