@@ -3,10 +3,12 @@ from __future__ import annotations
 import socket
 import ssl
 import subprocess
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from app.core.config import settings as app_config
 from app.schemas.settings import WebApplyResult
@@ -241,24 +243,38 @@ class WebHttpsApplyService:
         container_id = self._find_nginx_container_id()
         if not container_id:
             raise RuntimeError("Could not find nginx container to reload.")
-        self._run_command(["docker", "kill", "--signal=HUP", container_id], "Failed to reload nginx container")
+        self._docker_api_request(
+            "POST",
+            f"/containers/{container_id}/kill",
+            {"signal": "HUP"},
+            "Failed to reload nginx container",
+            expected_statuses={204},
+        )
 
     def _find_nginx_container_id(self) -> str | None:
-        result = self._run_command(
-            [
-                "docker",
-                "ps",
-                "--filter",
-                f"label=com.docker.compose.project={self.compose_project_name}",
-                "--filter",
-                "label=com.docker.compose.service=nginx",
-                "--format",
-                "{{.ID}}",
-            ],
+        containers = self._docker_api_request(
+            "GET",
+            "/containers/json",
+            {
+                "filters": json.dumps(
+                    {
+                        "label": [
+                            f"com.docker.compose.project={self.compose_project_name}",
+                            "com.docker.compose.service=nginx",
+                        ]
+                    }
+                )
+            },
             "Failed to query running nginx container",
+            expected_statuses={200},
         )
-        container_id = result.stdout.strip().splitlines()
-        return container_id[0] if container_id else None
+        if not isinstance(containers, list) or not containers:
+            return None
+        first = containers[0]
+        if not isinstance(first, dict):
+            return None
+        container_id = first.get("Id")
+        return container_id if isinstance(container_id, str) and container_id else None
 
     def _run_certbot(self, domain: str, email: str) -> None:
         self._run_command(
@@ -315,3 +331,55 @@ class WebHttpsApplyService:
             detail = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(f"{error_prefix}: {detail or 'unknown error'}")
         return result
+
+    def _docker_api_request(
+        self,
+        method: str,
+        path: str,
+        query: dict[str, str] | None,
+        error_prefix: str,
+        *,
+        expected_statuses: set[int],
+    ) -> Any:
+        request_path = path
+        if query:
+            request_path = f"{path}?{urlencode(query)}"
+
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(5.0)
+                client.connect("/var/run/docker.sock")
+                request = (
+                    f"{method} {request_path} HTTP/1.1\r\n"
+                    "Host: docker\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                )
+                client.sendall(request.encode("utf-8"))
+                chunks: list[bytes] = []
+                while True:
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+        except OSError as exc:
+            raise RuntimeError(f"{error_prefix}: {exc}") from exc
+
+        raw_response = b"".join(chunks)
+        header_bytes, _, body_bytes = raw_response.partition(b"\r\n\r\n")
+        header_lines = header_bytes.decode("utf-8", errors="replace").split("\r\n")
+        if not header_lines:
+            raise RuntimeError(f"{error_prefix}: empty response from Docker API")
+        status_line = header_lines[0].split(" ", 2)
+        if len(status_line) < 2 or not status_line[1].isdigit():
+            raise RuntimeError(f"{error_prefix}: malformed response from Docker API")
+        status_code = int(status_line[1])
+        if status_code not in expected_statuses:
+            detail = body_bytes.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"{error_prefix}: {detail or f'Docker API status {status_code}'}")
+        if not body_bytes.strip():
+            return None
+        try:
+            return json.loads(body_bytes.decode("utf-8"))
+        except json.JSONDecodeError:
+            return body_bytes.decode("utf-8", errors="replace")
