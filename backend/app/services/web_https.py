@@ -255,26 +255,52 @@ class WebHttpsApplyService:
         containers = self._docker_api_request(
             "GET",
             "/containers/json",
-            {
-                "filters": json.dumps(
-                    {
-                        "label": [
-                            f"com.docker.compose.project={self.compose_project_name}",
-                            "com.docker.compose.service=nginx",
-                        ]
-                    }
-                )
-            },
+            {"all": "0"},
             "Failed to query running nginx container",
             expected_statuses={200},
         )
         if not isinstance(containers, list) or not containers:
             return None
-        first = containers[0]
-        if not isinstance(first, dict):
-            return None
-        container_id = first.get("Id")
-        return container_id if isinstance(container_id, str) and container_id else None
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            labels = container.get("Labels") or {}
+            names = container.get("Names") or []
+            if not isinstance(labels, dict) or not isinstance(names, list):
+                continue
+
+            compose_service = labels.get("com.docker.compose.service")
+            compose_project = labels.get("com.docker.compose.project")
+            if compose_service == "nginx" and (
+                compose_project == self.compose_project_name or not self.compose_project_name
+            ):
+                container_id = container.get("Id")
+                if isinstance(container_id, str) and container_id:
+                    return container_id
+
+            normalized_names = [name.lstrip("/") for name in names if isinstance(name, str)]
+            for name in normalized_names:
+                if "nginx" not in name:
+                    continue
+                if self.compose_project_name and self.compose_project_name not in name:
+                    continue
+                container_id = container.get("Id")
+                if isinstance(container_id, str) and container_id:
+                    return container_id
+
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            names = container.get("Names") or []
+            if not isinstance(names, list):
+                continue
+            normalized_names = [name.lstrip("/") for name in names if isinstance(name, str)]
+            if any("nginx" in name for name in normalized_names):
+                container_id = container.get("Id")
+                if isinstance(container_id, str) and container_id:
+                    return container_id
+
+        return None
 
     def _run_certbot(self, domain: str, email: str) -> None:
         self._run_command(
