@@ -40,6 +40,11 @@ class WebHttpsService:
         if mode != "https":
             return (
                 "server {\n"
+                "    listen 80 default_server;\n"
+                "    server_name _;\n\n"
+                f"    return 301 http://{domain}$request_uri;\n"
+                "}\n\n"
+                "server {\n"
                 "    listen 80;\n"
                 f"    server_name {domain};\n\n"
                 "    client_max_body_size 2m;\n\n"
@@ -61,6 +66,11 @@ class WebHttpsService:
                 "}\n"
             )
         return (
+            "server {\n"
+            "    listen 80 default_server;\n"
+            "    server_name _;\n\n"
+            f"    return 301 https://{domain}$request_uri;\n"
+            "}\n\n"
             "server {\n"
             "    listen 80;\n"
             f"    server_name {domain};\n\n"
@@ -323,6 +333,11 @@ class WebHttpsApplyService:
 
     def _generate_acme_bootstrap_config(self, domain: str) -> str:
         return (
+            "server {\n"
+            "    listen 80 default_server;\n"
+            "    server_name _;\n\n"
+            f"    return 301 https://{domain}$request_uri;\n"
+            "}\n\n"
             "server {\n"
             "    listen 80;\n"
             f"    server_name {domain};\n\n"
