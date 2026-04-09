@@ -12,6 +12,7 @@ from app.models.topology import Topology, TopologyType
 from app.models.topology_node import TopologyNode, TopologyNodeRole
 from app.services.awg_profile import AWGProfileService
 from app.services.awg_templates import render_link_config, render_standard_server_config
+from app.services.server_runtime_paths import get_config_path, parse_runtime_details
 from app.services.standard_config_adopter import StandardConfigAdopter
 
 
@@ -220,18 +221,14 @@ class TopologyRenderer:
             proxy_routing_mode = self._proxy_routing_mode(topology)
             obfuscation_fields = self.awg_profile.for_subject(topology)
 
-            proxy_runtime = {}
-            if getattr(proxy_server, "live_runtime_details_json", None):
-                try:
-                    proxy_runtime = json.loads(proxy_server.live_runtime_details_json)
-                except json.JSONDecodeError:
-                    proxy_runtime = {}
+            proxy_runtime = parse_runtime_details(proxy_server)
             proxy_config_preview = proxy_runtime.get("config_preview") if isinstance(proxy_runtime, dict) else None
             proxy_client_interface_name = getattr(proxy_server, "live_interface_name", None) or "awg0"
+            proxy_live_config_path = get_config_path(proxy_server, proxy_runtime)
             proxy_has_live_config = (
                 isinstance(proxy_config_preview, str)
                 and proxy_config_preview.strip()
-                and bool(getattr(proxy_server, "live_config_path", None))
+                and bool(proxy_live_config_path)
             )
 
             proxy_main_keypair = key_provider(proxy_server.id, proxy_server.id, "awg0") if key_provider else None
@@ -267,12 +264,7 @@ class TopologyRenderer:
                 service_table_id = self._proxy_service_table_id(exit_node.priority)
                 service_listen_port = self._proxy_service_listen_port(exit_node.priority)
 
-                exit_runtime = {}
-                if getattr(exit_server, "live_runtime_details_json", None):
-                    try:
-                        exit_runtime = json.loads(exit_server.live_runtime_details_json)
-                    except json.JSONDecodeError:
-                        exit_runtime = {}
+                exit_runtime = parse_runtime_details(exit_server)
 
                 proxy_keypair = key_provider(proxy_server.id, exit_server.id, service_interface_name) if key_provider else None
                 if proxy_keypair:
@@ -282,10 +274,11 @@ class TopologyRenderer:
                     exit_private_from_provider, exit_public_key = self._generate_preview_keypair()
 
                 exit_config_preview = exit_runtime.get("config_preview") if isinstance(exit_runtime, dict) else None
+                exit_live_config_path = get_config_path(exit_server, exit_runtime)
                 exit_has_live_config = (
                     isinstance(exit_config_preview, str)
                     and exit_config_preview.strip()
-                    and bool(getattr(exit_server, "live_config_path", None))
+                    and bool(exit_live_config_path)
                 )
 
                 exit_private_key = None
@@ -346,7 +339,7 @@ class TopologyRenderer:
                 proxy_content = self._ensure_interface_setting(proxy_content, "Table", "off").strip()
 
                 exit_interface_name = getattr(exit_server, "live_interface_name", None) or "awg0"
-                exit_remote_path = getattr(exit_server, "live_config_path", None) or self._docker_remote_path(exit_server, exit_interface_name)
+                exit_remote_path = exit_live_config_path or self._docker_remote_path(exit_server, exit_interface_name)
                 if exit_has_live_config:
                     # Existing exit nodes keep their current awg0 and only receive a topology-owned service peer.
                     exit_content = self.adopter.render_with_service_peer(exit_config_preview, service_peer_for_exit).strip() + "\n"
