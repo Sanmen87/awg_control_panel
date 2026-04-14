@@ -10,6 +10,8 @@ English and Russian project overview for the current state of the repository.
 
 `AWG Control Panel` is a Dockerized control plane for AmneziaWG / AWG infrastructure.
 
+Current repository status: fully working MVP.
+
 Current stack:
 
 - `backend`: FastAPI, SQLAlchemy, Alembic, Celery
@@ -482,6 +484,8 @@ For a step-by-step VPS install guide in Russian see:
 ### Обзор
 
 `AWG Control Panel` это Docker-панель управления для инфраструктуры AmneziaWG / AWG.
+
+Текущий статус репозитория: полностью рабочее MVP.
 
 Текущий стек:
 
