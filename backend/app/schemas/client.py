@@ -45,6 +45,7 @@ class ManagedClientCreate(BaseModel):
 class ClientUpdate(BaseModel):
     name: str
     status: str | None = None
+    service_peer: bool | None = None
     exit_server_id: int | None = None
     import_note: str | None = None
     delivery_email: str | None = None
@@ -87,6 +88,7 @@ class ClientMaterialsRead(BaseModel):
 class ClientRead(ClientBase):
     id: int
     archived: bool = False
+    service_peer: bool = False
     manual_disabled: bool = False
     private_key_available: bool
     materials_available: bool

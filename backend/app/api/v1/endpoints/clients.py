@@ -142,15 +142,14 @@ def _decorate_client(client: Client) -> Client:
 @router.get("", response_model=list[ClientRead])
 def list_clients(
     archived: bool = Query(False),
+    service_peer: bool | None = Query(None),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> list[Client]:
-    clients = (
-        db.query(Client)
-        .filter(Client.archived.is_(archived))
-        .order_by(Client.created_at.desc())
-        .all()
-    )
+    query = db.query(Client).filter(Client.archived.is_(archived))
+    if service_peer is not None:
+        query = query.filter(Client.service_peer.is_(service_peer))
+    clients = query.order_by(Client.created_at.desc()).all()
     for client in clients:
         _decorate_client(client)
     return clients
@@ -329,6 +328,8 @@ def update_client(
             client.status = "disabled" if client.policy_disabled_reason else "active"
         else:
             client.status = payload.status
+    if "service_peer" in payload.model_fields_set and payload.service_peer is not None:
+        client.service_peer = payload.service_peer
     if "exit_server_id" in payload.model_fields_set:
         client.exit_server_id = payload.exit_server_id
     client.import_note = payload.import_note

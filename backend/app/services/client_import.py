@@ -340,12 +340,14 @@ class ClientImportService:
                 f"Imported from {server.name}; endpoint={peer.get('endpoint', '')}; "
                 f"rx={peer.get('transfer_rx', '')}; tx={peer.get('transfer_tx', '')}"
             )
+            service_peer = bool(peer.get("service_peer"))
             if existing:
                 if preferred_name and existing.name.startswith(f"{server.name}-peer-"):
                     existing.name = self._make_unique_name(db, preferred_name)
                 existing.assigned_ip = assigned_ip
                 existing.import_note = note
                 existing.source = ClientSource.IMPORTED
+                existing.service_peer = service_peer
                 existing.status = existing.status or "active"
                 db.add(existing)
                 db.commit()
@@ -361,6 +363,7 @@ class ClientImportService:
                 archived_match.import_note = note
                 archived_match.server_id = server.id
                 archived_match.archived = False
+                archived_match.service_peer = service_peer
                 archived_match.status = "active"
                 archived_match.manual_disabled = False
                 archived_match.policy_disabled_reason = None
@@ -382,6 +385,7 @@ class ClientImportService:
                 source=ClientSource.IMPORTED,
                 server_id=server.id,
                 import_note=note,
+                service_peer=service_peer,
             )
             db.add(client)
             db.commit()
@@ -477,6 +481,7 @@ class ClientImportService:
                     "preshared_key": preshared_key_match.group(1).strip() if preshared_key_match else "",
                     "endpoint": endpoint_match.group(1).strip() if endpoint_match else "",
                     "persistent_keepalive": persistent_keepalive_match.group(1).strip() if persistent_keepalive_match else "",
+                    "service_peer": "service-exit-peer" in block,
                 }
             )
         return peers

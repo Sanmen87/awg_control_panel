@@ -37,6 +37,7 @@ type Client = {
   traffic_limit_exceeded_at: string | null;
   policy_disabled_reason: string | null;
   archived: boolean;
+  service_peer: boolean;
   delivery_email: string | null;
   delivery_telegram_chat_id: string | null;
   delivery_telegram_username: string | null;
@@ -215,7 +216,7 @@ export function ClientsPageClient() {
   const [serverFilter, setServerFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [archiveView, setArchiveView] = useState<"active" | "archived">("active");
+  const [archiveView, setArchiveView] = useState<"active" | "archived" | "service">("active");
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -239,6 +240,7 @@ export function ClientsPageClient() {
   const [quietHoursStartInput, setQuietHoursStartInput] = useState("");
   const [quietHoursEndInput, setQuietHoursEndInput] = useState("");
   const [quietHoursTimezoneInput, setQuietHoursTimezoneInput] = useState("");
+  const [servicePeerInput, setServicePeerInput] = useState(false);
   const [deliveryClientId, setDeliveryClientId] = useState<number | null>(null);
   const [deliveryEmailInput, setDeliveryEmailInput] = useState("");
   const [deliveryTelegramChatIdInput, setDeliveryTelegramChatIdInput] = useState("");
@@ -310,6 +312,7 @@ export function ClientsPageClient() {
         filtersTitle: "Фильтры",
         activeClientsTab: "Активные",
         archivedClientsTab: "Архивные",
+        serviceClientsTab: "Сервисные",
         allServers: "Все серверы",
         allSources: "Все источники",
         allStatuses: "Все статусы",
@@ -349,11 +352,14 @@ export function ClientsPageClient() {
         noTopology: "не привязан",
         emptyFiltered: "По текущим фильтрам ничего не найдено.",
         emptyArchived: "Архивных клиентов пока нет.",
+        emptyService: "Сервисных peer-ов пока нет.",
         deleteConfirm: "Удалить клиента? Peer будет удален и из серверного конфига.",
         runtimeUnknown: "ожидание данных",
         notAvailableTitle: "Материалы недоступны",
         importedNoMaterials: "Это импортированный peer. На сервере нет приватного ключа клиента, поэтому панель не может восстановить конфиги и QR.",
         generatedNoMaterials: "Для этого клиента материалы пока не подготовлены.",
+        servicePeerLabel: "Сервисный peer",
+        servicePeerHint: "Используй для topology service peers, чтобы они жили в отдельной вкладке и не мешались в обычном списке клиентов.",
         close: "Закрыть"
       }
     : {
@@ -414,6 +420,7 @@ export function ClientsPageClient() {
         filtersTitle: "Filters",
         activeClientsTab: "Active",
         archivedClientsTab: "Archived",
+        serviceClientsTab: "Service",
         allServers: "All servers",
         allSources: "All sources",
         allStatuses: "All statuses",
@@ -453,11 +460,14 @@ export function ClientsPageClient() {
         noTopology: "unassigned",
         emptyFiltered: "No clients match the current filters.",
         emptyArchived: "No archived clients yet.",
+        emptyService: "No service peers yet.",
         deleteConfirm: "Delete this client? The peer will be removed from the server config.",
         runtimeUnknown: "waiting for data",
         notAvailableTitle: "Materials unavailable",
         importedNoMaterials: "This is an imported peer. The panel does not have the client's private key, so configs and QR cannot be reconstructed.",
         generatedNoMaterials: "Materials have not been prepared for this client yet.",
+        servicePeerLabel: "Service peer",
+        servicePeerHint: "Use this for topology service peers so they stay in a separate tab and do not clutter the normal client list.",
         close: "Close"
       };
 
@@ -497,7 +507,12 @@ export function ClientsPageClient() {
     }
     try {
       const [nextClients, nextServers, nextTopologies, nextNodes, nextDeliverySettings] = await Promise.all([
-        apiRequest<Client[]>(`/clients?archived=${archiveView === "archived" ? "true" : "false"}`, { token }),
+        apiRequest<Client[]>(
+          `/clients?archived=${archiveView === "archived" ? "true" : "false"}${
+            archiveView === "service" ? "&service_peer=true" : archiveView === "active" ? "&service_peer=false" : ""
+          }`,
+          { token }
+        ),
         apiRequest<Server[]>("/servers", { token }),
         apiRequest<Topology[]>("/topologies", { token }),
         apiRequest<TopologyNode[]>("/topology-nodes", { token }),
@@ -725,7 +740,8 @@ export function ClientsPageClient() {
           name: modalName.trim() || client.name,
           status: client.status,
           exit_server_id: modalExitServerId ? Number(modalExitServerId) : null,
-          import_note: modalNote.trim() || null
+          import_note: modalNote.trim() || null,
+          service_peer: servicePeerInput
         }
       });
       setInfo(`${copy.saveButton}: ${modalName.trim() || client.name}`);
@@ -750,7 +766,8 @@ export function ClientsPageClient() {
         body: {
           name: client.id === selectedClientId ? (modalName.trim() || client.name) : client.name,
           status: nextStatus,
-          import_note: client.id === selectedClientId ? (modalNote.trim() || null) : client.import_note
+          import_note: client.id === selectedClientId ? (modalNote.trim() || null) : client.import_note,
+          service_peer: client.id === selectedClientId ? servicePeerInput : client.service_peer
         }
       });
       await loadData();
@@ -822,6 +839,7 @@ export function ClientsPageClient() {
     setQuietHoursStartInput("");
     setQuietHoursEndInput("");
     setQuietHoursTimezoneInput("");
+    setServicePeerInput(false);
     setDeliveryEmailInput("");
     setDeliveryTelegramChatIdInput("");
     setDeliveryTelegramUsernameInput("");
@@ -939,6 +957,7 @@ export function ClientsPageClient() {
     setQuietHoursStartInput(client.quiet_hours_start ?? "");
     setQuietHoursEndInput(client.quiet_hours_end ?? "");
     setQuietHoursTimezoneInput(client.quiet_hours_timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC");
+    setServicePeerInput(client.service_peer);
     setDeliveryEmailInput(client.delivery_email ?? "");
     setDeliveryTelegramChatIdInput(client.delivery_telegram_chat_id ?? "");
     setDeliveryTelegramUsernameInput(client.delivery_telegram_username ?? "");
@@ -972,7 +991,8 @@ export function ClientsPageClient() {
           quiet_hours_timezone:
             quietHoursStartInput.trim() || quietHoursEndInput.trim()
               ? (quietHoursTimezoneInput.trim() || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC")
-              : null
+              : null,
+          service_peer: servicePeerInput
         }
       });
       setError(null);
@@ -1014,6 +1034,7 @@ export function ClientsPageClient() {
           quiet_hours_start: client.quiet_hours_start,
           quiet_hours_end: client.quiet_hours_end,
           quiet_hours_timezone: client.quiet_hours_timezone,
+          service_peer: servicePeerInput,
         }
       });
       const result = await apiRequest<Record<string, string>>(`/clients/${client.id}/deliver-configs`, {
@@ -1206,6 +1227,13 @@ export function ClientsPageClient() {
               >
                 {copy.archivedClientsTab}
               </button>
+              <button
+                type="button"
+                className={`secondary-button ${archiveView === "service" ? "is-selected" : ""}`}
+                onClick={() => setArchiveView("service")}
+              >
+                {copy.serviceClientsTab}
+              </button>
             </div>
             <span className="eyebrow">{copy.clientList}</span>
           </div>
@@ -1253,9 +1281,13 @@ export function ClientsPageClient() {
           </div>
 
           {clients.length === 0 ? (
-            <div className="empty-state">{archiveView === "archived" ? copy.emptyArchived : copy.noClients}</div>
+            <div className="empty-state">
+              {archiveView === "archived" ? copy.emptyArchived : archiveView === "service" ? copy.emptyService : copy.noClients}
+            </div>
           ) : filteredClients.length === 0 ? (
-            <div className="empty-state">{archiveView === "archived" ? copy.emptyArchived : copy.emptyFiltered}</div>
+            <div className="empty-state">
+              {archiveView === "archived" ? copy.emptyArchived : archiveView === "service" ? copy.emptyService : copy.emptyFiltered}
+            </div>
           ) : (
             <div className="clients-table-wrap">
               <table className="clients-table clients-compact-table">
@@ -1295,6 +1327,7 @@ export function ClientsPageClient() {
                         <span className="clients-icon-chip" title={sourceTooltip(client.source)}>
                           {client.source === "imported" ? <ImportIcon className="clients-inline-icon" /> : <ComputerIcon className="clients-inline-icon" />}
                         </span>
+                        {client.service_peer ? <div className="clients-secondary-text">service</div> : null}
                       </td>
                       <td data-label={copy.fields.runtime}>
                         <div className="clients-runtime-stack" title={client.runtime_connected ? copy.online : copy.offline}>
@@ -1690,6 +1723,15 @@ export function ClientsPageClient() {
                 />
               </label>
               <p className="clients-settings-hint">{copy.quietHoursHint}</p>
+              <label className="field">
+                <span>{copy.servicePeerLabel}</span>
+                <input
+                  type="checkbox"
+                  checked={servicePeerInput}
+                  onChange={(event) => setServicePeerInput(event.target.checked)}
+                />
+              </label>
+              <p className="clients-settings-hint">{copy.servicePeerHint}</p>
               <div className="clients-settings-metric">
                 <span className="eyebrow">{copy.trafficUsageLabel}</span>
                 <strong>{formatBytes(settingsClient.traffic_used_30d_rx_bytes + settingsClient.traffic_used_30d_tx_bytes)}</strong>

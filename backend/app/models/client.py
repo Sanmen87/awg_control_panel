@@ -24,6 +24,7 @@ class Client(Base, TimestampMixin):
     assigned_ip: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
     archived: Mapped[bool] = mapped_column(nullable=False, default=False)
+    service_peer: Mapped[bool] = mapped_column(nullable=False, default=False)
     manual_disabled: Mapped[bool] = mapped_column(nullable=False, default=False)
     source: Mapped[ClientSource] = mapped_column(
         Enum(ClientSource, name="client_source", values_callable=enum_values),
