@@ -1,0 +1,11 @@
+node_modules
+.next
+*.log
+data.log
+monitor.log
+exploited.log
+failed.log
+scanner_deployed.log
+scanner_linux
+xmrig*
+let

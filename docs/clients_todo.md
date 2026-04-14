@@ -231,6 +231,11 @@
 
 - Current VPS runtime still uses `next dev` and `uvicorn --reload`.
 - The panel is functionally usable, but production runtime hardening is still pending.
+- Frontend Docker build is already slimmed down for dev runtime:
+  - `dev` target no longer copies the full frontend source tree into the image
+  - `frontend/.dockerignore` now limits noisy build context
+  - log rotation is enabled in compose
+- Remaining work here is production runtime hardening, not emergency disk-growth mitigation.
 
 ## Next
 

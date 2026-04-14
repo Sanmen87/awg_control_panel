@@ -212,6 +212,33 @@ Notes:
 - separate sidebar route for `Backups`
 - separate sidebar route for `Web / HTTPS`
 - panel web publishing settings are now separated from delivery settings
+- frontend Docker build now uses a dedicated `dev` target so local / VPS dev runtime no longer bakes the whole source tree into the image
+- frontend Dockerfile now supports:
+  - `dev` target for `next dev`
+  - `builder` target for `next build`
+  - `runner` target for standalone production runtime
+- frontend dependency layer now prefers `npm ci` when `package-lock.json` exists
+- frontend build context is constrained by `frontend/.dockerignore`
+
+#### Docker Runtime Hygiene
+
+- compose enables Docker log rotation for the main services:
+  - `max-size: 10m`
+  - `max-file: 3`
+- this prevents unbounded growth of container `json-file` logs on small VPS disks
+- frontend named volumes are used for:
+  - `node_modules`
+  - `.next`
+- current practical disk-growth watchpoints on small VPS nodes are:
+  - Docker build cache
+  - large rebuilt images
+  - `journald`
+- the current operational cleanup commands are:
+
+```bash
+docker builder prune -af
+journalctl --vacuum-size=200M
+```
 
 #### Web / HTTPS
 
