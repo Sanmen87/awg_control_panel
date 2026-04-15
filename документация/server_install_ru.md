@@ -82,8 +82,35 @@ AUTH_LOGIN_BAN_SECONDS=900
 
 ## 5. Первый запуск
 
+На публичном VPS frontend нужно запускать в production-режиме, а не через `next dev`.
+
+Сделай production override:
+
+```bash
+cp docker-compose.prod.yml docker-compose.override.yml
+```
+
+После этого обычный `docker compose` на этом сервере будет автоматически использовать production-настройки frontend:
+
+- Dockerfile target `runner`
+- `node server.js` вместо `npm run dev`
+- без bind mount `./frontend:/app`
+- запуск от non-root пользователя `nextjs`
+- read-only root filesystem
+- `/tmp` как `tmpfs` с `noexec`
+- `cap_drop: ALL`
+- `no-new-privileges`
+
+Запусти стек:
+
 ```bash
 sudo docker compose up -d --build
+```
+
+Если не хочешь создавать `docker-compose.override.yml`, можно запускать явно:
+
+```bash
+sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
 Проверка:
@@ -92,12 +119,28 @@ sudo docker compose up -d --build
 sudo docker compose ps
 sudo docker compose logs --tail=100 migrate
 sudo docker compose logs --tail=100 backend
+sudo docker compose logs --tail=100 frontend
 ```
 
 Ожидаемо:
 
 - `migrate` завершился успешно
 - `backend`, `worker`, `scheduler`, `frontend`, `nginx` находятся в `Up`
+- frontend в логах стартует как production Next.js server, без `npm run dev`
+
+Проверить фактический режим frontend:
+
+```bash
+sudo docker compose config frontend
+```
+
+Для production должны быть видны:
+
+- `target: runner`
+- `command: node server.js`
+- `read_only: true`
+- `cap_drop: [ALL]`
+- отсутствие `volumes` у `frontend`
 
 ## 6. Первый вход
 
@@ -187,6 +230,7 @@ https://panel.example.com
 ```bash
 cd ~/awg_control_panel
 git pull
+cp docker-compose.prod.yml docker-compose.override.yml
 sudo docker compose up -d --build
 ```
 
@@ -199,8 +243,15 @@ sudo docker compose up -d --build backend worker scheduler nginx
 Если менялся frontend:
 
 ```bash
+cp docker-compose.prod.yml docker-compose.override.yml
 sudo docker compose up -d --build frontend nginx
 ```
+
+Важно:
+
+- не запускай публичный VPS через frontend `next dev`
+- если `docker-compose.override.yml` отсутствует, обычный `docker compose up` вернёт frontend в dev-режим из основного `docker-compose.yml`
+- перед применением обновлений проверяй `sudo docker compose config frontend`
 
 ## 12. Полезные команды
 
@@ -236,8 +287,35 @@ sudo docker compose logs --tail=200 migrate
 
 ## 13. Текущее состояние runtime
 
-Сейчас панель уже рабочая, но важно помнить:
+Сейчас панель является рабочим MVP.
 
-- frontend пока работает через `next dev`
+Актуальный публичный VPS runtime:
+
+- frontend должен работать через production `runner`, а не через `next dev`
+- frontend не должен иметь bind mount исходников
+- frontend должен запускаться от пользователя `nextjs`
+- frontend должен иметь `read_only: true`, `cap_drop: ALL`, `no-new-privileges`
 - backend пока работает через `uvicorn --reload`
-- production-hardening ещё не завершён
+
+Оставшаяся задача hardening:
+
+- заменить backend `uvicorn --reload` на production backend profile
+- дополнительно ужесточить nginx / fail2ban / IP allowlist при необходимости
+
+## 14. Dev-режим только для локальной разработки
+
+Локально, на машине разработчика, можно запускать обычный dev-режим:
+
+```bash
+docker compose up -d --build
+```
+
+В этом режиме frontend использует:
+
+- `target: dev`
+- `npm run dev`
+- bind mount `./frontend:/app`
+- hot reload
+- writable `.next`
+
+Этот режим нельзя использовать как публичный web runtime.

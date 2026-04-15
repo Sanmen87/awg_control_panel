@@ -1,0 +1,17 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      target: runner
+    command: node server.js
+    environment:
+      ENVIRONMENT: production
+      NODE_ENV: production
+    volumes: !reset []
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

@@ -65,6 +65,34 @@ sudo docker compose build backend worker scheduler frontend
 sudo docker compose up -d backend worker scheduler frontend nginx
 ```
 
+### Runtime modes
+
+Local development mode uses the default compose file:
+
+```bash
+docker compose up -d --build
+```
+
+In this mode `frontend` runs the Dockerfile `dev` target with `npm run dev`, bind-mounts `./frontend:/app`, and keeps writable `node_modules` / `.next` volumes for hot reload.
+
+Production frontend mode must be used for public web deployments:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+In this mode `frontend` runs the Dockerfile `runner` target with `node server.js`, has no bind-mounted source tree, runs as the non-root `nextjs` user, uses a read-only root filesystem, drops Linux capabilities, and mounts `/tmp` as `noexec` tmpfs.
+
+On a VPS, `docker-compose.override.yml` may be copied from `docker-compose.prod.yml` so plain `docker compose up -d --build` keeps the production frontend mode by default.
+
+Check the effective mode before applying changes:
+
+```bash
+docker compose config frontend
+```
+
+Production frontend should show `target: runner`, `command: node server.js`, `read_only: true`, `cap_drop: [ALL]`, and no `volumes`.
+
 ### What is implemented now
 
 #### Servers
@@ -214,11 +242,18 @@ Notes:
 - separate sidebar route for `Backups`
 - separate sidebar route for `Web / HTTPS`
 - panel web publishing settings are now separated from delivery settings
-- frontend Docker build now uses a dedicated `dev` target so local / VPS dev runtime no longer bakes the whole source tree into the image
+- frontend Docker build now uses a dedicated `dev` target so local dev runtime no longer bakes the whole source tree into the image
 - frontend Dockerfile now supports:
   - `dev` target for `next dev`
   - `builder` target for `next build`
   - `runner` target for standalone production runtime
+- public VPS frontend runtime now uses the production `runner` target instead of `next dev`
+- production frontend runtime has no bind-mounted source tree and runs as non-root `nextjs`
+- production frontend hardening uses:
+  - read-only root filesystem
+  - `tmpfs` `/tmp` with `noexec`
+  - `cap_drop: ALL`
+  - `no-new-privileges`
 - frontend dependency layer now prefers `npm ci` when `package-lock.json` exists
 - frontend build context is constrained by `frontend/.dockerignore`
 
@@ -228,9 +263,10 @@ Notes:
   - `max-size: 10m`
   - `max-file: 3`
 - this prevents unbounded growth of container `json-file` logs on small VPS disks
-- frontend named volumes are used for:
+- in local dev mode, frontend named volumes are used for:
   - `node_modules`
   - `.next`
+- in production frontend mode, these frontend volumes are intentionally removed so runtime state is not persisted across container recreation
 - current practical disk-growth watchpoints on small VPS nodes are:
   - Docker build cache
   - large rebuilt images
@@ -536,6 +572,34 @@ sudo docker compose build backend worker scheduler frontend
 sudo docker compose up -d backend worker scheduler frontend nginx
 ```
 
+### Режимы запуска
+
+Локальный dev-режим использует основной compose-файл:
+
+```bash
+docker compose up -d --build
+```
+
+В этом режиме `frontend` запускает Dockerfile target `dev` через `npm run dev`, монтирует `./frontend:/app` и использует writable volumes для `node_modules` и `.next`. Это удобно для hot reload, но не подходит для публичного веба.
+
+Production-режим фронта для публичного сервера:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+В этом режиме `frontend` запускает Dockerfile target `runner` через `node server.js`, не монтирует исходники в контейнер, работает от non-root пользователя `nextjs`, использует read-only root filesystem, сбрасывает Linux capabilities и монтирует `/tmp` как `noexec` tmpfs.
+
+На VPS можно скопировать `docker-compose.prod.yml` в `docker-compose.override.yml`, чтобы обычный `docker compose up -d --build` автоматически оставался в production-режиме frontend.
+
+Проверить фактический режим:
+
+```bash
+docker compose config frontend
+```
+
+Для production frontend должны быть видны `target: runner`, `command: node server.js`, `read_only: true`, `cap_drop: [ALL]` и отсутствие `volumes`.
+
 ### Что уже реализовано
 
 #### Серверы
@@ -685,6 +749,18 @@ sudo docker compose up -d backend worker scheduler frontend nginx
   - обновлённый helper по AWG profile
   - обновлённый helper по selective routing под текущий статичный список
 - настройки публикации панели в веб вынесены в отдельную страницу `Web / HTTPS`
+- Dockerfile frontend поддерживает:
+  - `dev` target для `next dev`
+  - `builder` target для `next build`
+  - `runner` target для standalone production runtime
+- публичный VPS runtime frontend теперь использует production `runner`, а не `next dev`
+- production frontend запускается без bind mount исходников и от non-root пользователя `nextjs`
+- production hardening для frontend включает:
+  - read-only root filesystem
+  - `/tmp` как `tmpfs` с `noexec`
+  - `cap_drop: ALL`
+  - `no-new-privileges`
+- локальный dev-режим сохраняет hot reload через bind mount и volumes, но этот режим нельзя использовать как публичный web runtime
 
 #### Web / HTTPS
 

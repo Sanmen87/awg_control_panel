@@ -229,13 +229,21 @@
 
 ### Web Runtime
 
-- Current VPS runtime still uses `next dev` and `uvicorn --reload`.
-- The panel is functionally usable, but production runtime hardening is still pending.
-- Frontend Docker build is already slimmed down for dev runtime:
+- Current public VPS frontend runtime now uses the production `runner` target instead of `next dev`.
+- Frontend production runtime is hardened enough for the current MVP deployment:
+  - no bind-mounted frontend source tree
+  - no persisted frontend `.next` runtime volume
+  - non-root `nextjs` runtime user
+  - read-only root filesystem
+  - `/tmp` mounted as `tmpfs` with `noexec`
+  - `cap_drop: ALL`
+  - `no-new-privileges`
+- Local frontend development mode remains available:
   - `dev` target no longer copies the full frontend source tree into the image
   - `frontend/.dockerignore` now limits noisy build context
-  - log rotation is enabled in compose
-- Remaining work here is production runtime hardening, not emergency disk-growth mitigation.
+  - bind-mounted `./frontend:/app` keeps hot reload
+- Log rotation is enabled in compose.
+- Remaining work here is backend/runtime hardening, not emergency disk-growth mitigation.
 
 ## Next
 
@@ -344,7 +352,8 @@
 
 ### Web Runtime And Hardening
 
-- Replace current dev-style panel runtime with proper production frontend/backend start.
+- Keep public VPS frontend on production `runner` mode and do not expose `next dev`.
+- Replace backend `uvicorn --reload` with a production backend process profile.
 - Harden current `Web / HTTPS` apply flow and error reporting.
 - Support a practical "panel on proxy server" deployment profile without breaking AWG routing.
 - Add host-level brute-force protection:
