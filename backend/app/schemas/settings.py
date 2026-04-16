@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DeliverySettingsRead(BaseModel):
@@ -61,12 +61,24 @@ class WebSettingsRead(BaseModel):
     admin_email: str | None = None
     web_mode: str = "http"
     generated_nginx_config: str
+    external_api_enabled: bool = False
+    external_api_token_configured: bool = False
+    external_api_token_prefix: str | None = None
+    external_api_token_scopes: list[str] = Field(default_factory=list)
 
 
 class WebSettingsUpdate(BaseModel):
     public_domain: str | None = None
     admin_email: str | None = None
     web_mode: str = "http"
+    external_api_enabled: bool = False
+
+
+class WebExternalApiTokenResult(BaseModel):
+    token: str
+    token_prefix: str
+    scopes: list[str]
+    detail: str
 
 
 class WebStatusRead(BaseModel):

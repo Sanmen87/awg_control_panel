@@ -199,6 +199,40 @@ Notes:
   - `AmneziaVPN` as `.vpn`
 - imported peers are shown, but config/QR reconstruction is not possible without the private key
 
+#### External API
+
+- the external API is disabled by default and is enabled from the `Web / HTTPS` settings page
+- the same page can generate or rotate the default external API token; the raw token is shown once, store it in the external system immediately
+- admin users can issue scoped service tokens through `/api/v1/api-tokens`
+- external systems authenticate with `Authorization: Bearer <token>` or `X-API-Token`
+- if the external API toggle is off, `/api/v1/external/*` returns `403` even for a valid token
+- token scopes:
+  - `servers:read`
+  - `clients:read`
+  - `clients:write`
+  - `materials:read`
+- current external endpoints:
+  - `GET /api/v1/external/servers`
+  - `GET /api/v1/external/client-targets`
+  - `GET /api/v1/external/clients`
+  - `POST /api/v1/external/topologies/{topology_id}/clients`
+  - `POST /api/v1/external/clients/{client_id}/suspend`
+  - `POST /api/v1/external/clients/{client_id}/resume`
+  - `GET /api/v1/external/clients/{client_id}/materials`
+  - `DELETE /api/v1/external/clients/{client_id}`
+- managed clients are created by topology, not by raw server ID
+- for proxy + exit topologies, managed clients are created on the proxy node; use `GET /api/v1/external/client-targets` to discover the `create_server_id`, available exits, and `default_exit_server_id`
+- for simple topologies, the same target endpoint returns the single create node and an empty exit list
+- preferred external flow:
+  - discover the target with `GET /api/v1/external/client-targets`
+  - create a client through `POST /api/v1/external/topologies/{topology_id}/clients`
+  - use `?include_materials=true` on create if the external system must receive connection data in the same response
+  - or call `GET /api/v1/external/clients/{client_id}/materials` after create if the external system wants to fetch configs separately
+  - omit `exit_server_id` to use the topology default exit, or pass one of the returned exit server IDs
+- suspend and resume are explicit API actions and do not change the regular panel client management flow
+- external write/material actions are recorded in audit logs with actor type `api_token`
+- detailed usage guide: `docs/externalapi.md`
+
 #### Runtime stats
 
 - periodic Celery sync every minute
@@ -707,6 +741,40 @@ docker compose config frontend
   - `AmneziaWG` как `.conf`
   - `AmneziaVPN` как `.vpn`
 - imported peer-клиенты отображаются, но восстановить их конфиг или QR нельзя без приватного ключа
+
+#### Внешний API
+
+- внешний API по умолчанию выключен и включается на странице `Web / HTTPS`
+- на этой же странице можно сгенерировать или перевыпустить основной external API token; сырой токен показывается один раз, его нужно сразу сохранить во внешней системе
+- админ панели может выпускать scoped service tokens через `/api/v1/api-tokens`
+- внешние системы авторизуются через `Authorization: Bearer <token>` или `X-API-Token`
+- если внешний API выключен, `/api/v1/external/*` возвращает `403` даже с корректным токеном
+- scopes токена:
+  - `servers:read`
+  - `clients:read`
+  - `clients:write`
+  - `materials:read`
+- текущие external endpoints:
+  - `GET /api/v1/external/servers`
+  - `GET /api/v1/external/client-targets`
+  - `GET /api/v1/external/clients`
+  - `POST /api/v1/external/topologies/{topology_id}/clients`
+  - `POST /api/v1/external/clients/{client_id}/suspend`
+  - `POST /api/v1/external/clients/{client_id}/resume`
+  - `GET /api/v1/external/clients/{client_id}/materials`
+  - `DELETE /api/v1/external/clients/{client_id}`
+- управляемые клиенты через внешний API создаются по topology, а не по произвольному server ID
+- для топологий proxy + exit управляемые клиенты создаются на proxy-ноде; `GET /api/v1/external/client-targets` показывает `create_server_id`, доступные exit-серверы и `default_exit_server_id`
+- для simple topology этот же endpoint возвращает единственную create-ноду и пустой список exit-серверов
+- рекомендуемый flow для внешней системы:
+  - получить цель через `GET /api/v1/external/client-targets`
+  - создать клиента через `POST /api/v1/external/topologies/{topology_id}/clients`
+  - добавить `?include_materials=true`, если внешней системе нужно сразу получить данные подключения в ответе create
+  - или отдельно вызвать `GET /api/v1/external/clients/{client_id}/materials`, если конфиги нужно забирать вторым запросом
+  - не передавать `exit_server_id`, если нужен default exit, или передать один из exit server ID из ответа
+- suspend и resume вынесены в отдельные action-endpoints и не ломают обычное управление клиентами из панели
+- external write/material действия пишутся в audit logs с actor type `api_token`
+- подробная инструкция: `docs/externalapi.md`
 
 #### Runtime-статистика
 

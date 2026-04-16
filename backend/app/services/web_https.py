@@ -105,18 +105,30 @@ class WebHttpsService:
             "}\n"
         )
 
-    def build_read_payload(self, payload: WebSettingsPayload) -> dict[str, Any]:
+    def build_read_payload(
+        self,
+        payload: WebSettingsPayload,
+        *,
+        external_api_token_configured: bool = False,
+        external_api_token_prefix: str | None = None,
+        external_api_token_scopes: list[str] | None = None,
+    ) -> dict[str, Any]:
         normalized = self.normalize_domain(payload.public_domain)
         normalized_payload = WebSettingsPayload(
             public_domain=normalized,
             admin_email=payload.admin_email,
             web_mode=payload.web_mode,
+            external_api_enabled=payload.external_api_enabled,
         )
         return {
             "public_domain": normalized,
             "admin_email": payload.admin_email,
             "web_mode": payload.web_mode,
             "generated_nginx_config": self.generate_nginx_config(normalized_payload),
+            "external_api_enabled": payload.external_api_enabled,
+            "external_api_token_configured": external_api_token_configured,
+            "external_api_token_prefix": external_api_token_prefix,
+            "external_api_token_scopes": external_api_token_scopes or [],
         }
 
     def get_status(self, payload: WebSettingsPayload) -> WebStatusRead:
@@ -226,6 +238,7 @@ class WebHttpsApplyService:
             public_domain=domain,
             admin_email=(payload.admin_email or "").strip() or None,
             web_mode=mode,
+            external_api_enabled=payload.external_api_enabled,
         )
         self._write_nginx_config(self.inspect_service.generate_nginx_config(final_payload))
         self._reload_nginx()

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import os
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -46,3 +47,21 @@ def encrypt_value(value: str) -> str:
 
 def decrypt_value(value: str) -> str:
     return _build_fernet().decrypt(value.encode("utf-8")).decode("utf-8")
+
+
+def generate_api_token() -> tuple[str, str]:
+    prefix = secrets.token_urlsafe(6).replace("-", "").replace("_", "")[:8]
+    secret = secrets.token_urlsafe(32)
+    return prefix, f"awgcp_{prefix}_{secret}"
+
+
+def hash_api_token(token: str) -> str:
+    digest = hmac.new(settings.secret_key.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
+    return digest
+
+
+def api_token_prefix(token: str) -> str | None:
+    parts = token.split("_", 2)
+    if len(parts) != 3 or parts[0] != "awgcp":
+        return None
+    return parts[1] or None

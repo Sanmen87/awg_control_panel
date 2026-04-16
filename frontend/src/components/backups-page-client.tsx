@@ -77,6 +77,7 @@ export function BackupsPageClient() {
   const [bundleTargetByBackup, setBundleTargetByBackup] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [showOlderBackups, setShowOlderBackups] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -128,6 +129,11 @@ export function BackupsPageClient() {
         createdAt: "Создано",
         noArchive: "Архив ещё не готов",
         panelRestoreHint: "Полный бэкап включает панель и серверные конфиги в одном bundle.",
+        recentBackups: "Последние архивы",
+        olderBackups: "Старые архивы",
+        showOlderBackups: "Показать старые архивы",
+        hideOlderBackups: "Скрыть старые архивы",
+        archiveCount: "архивов",
       }
     : {
         eyebrow: "Backups",
@@ -175,6 +181,11 @@ export function BackupsPageClient() {
         createdAt: "Created",
         noArchive: "Archive is not ready yet",
         panelRestoreHint: "A full backup includes the panel state and server configs in one bundle.",
+        recentBackups: "Recent archives",
+        olderBackups: "Older archives",
+        showOlderBackups: "Show older archives",
+        hideOlderBackups: "Hide older archives",
+        archiveCount: "archives",
       };
 
   async function loadData() {
@@ -239,10 +250,8 @@ export function BackupsPageClient() {
     () => servers.filter((server) => server.awg_detected || server.ready_for_topology),
     [servers]
   );
-  const uploadedBackups = useMemo(
-    () => backups.filter((backup) => isUploadedBackup(backup)),
-    [backups]
-  );
+  const recentBackups = useMemo(() => backups.slice(0, 5), [backups]);
+  const olderBackups = useMemo(() => backups.slice(5), [backups]);
 
   function serverLabel(serverId: number | null) {
     if (!serverId) {
@@ -533,6 +542,174 @@ export function BackupsPageClient() {
     }
   }
 
+  function renderBackupCard(backup: BackupJob) {
+    return (
+      <article key={backup.id} className="server-card backup-card-compact">
+        <div className="server-card-header">
+          <div>
+            <h3>#{backup.id} · {serverLabel(backup.server_id)}</h3>
+            <p>{copy.createdAt}: {backup.created_at}</p>
+          </div>
+          <div className="action-row compact-action-row">
+            <span className={`status-badge ${
+              backup.status === "succeeded"
+                ? "status-succeeded"
+                : backup.status === "failed"
+                  ? "status-failed"
+                  : "status-pending"
+            }`}>
+              {copy.status}: {backup.status}
+            </span>
+            <span className="status-badge">{copy.type}: {backup.backup_type}</span>
+          </div>
+        </div>
+
+        <div className="server-meta">
+          <span>{copy.source}: {backupSourceLabel(backup)}</span>
+          <span>{copy.storage}: {backup.storage_path ?? copy.noArchive}</span>
+          {backup.result_message ? <span>{copy.result}: {backup.result_message}</span> : null}
+        </div>
+        {isUploadedBackup(backup) ? <div className="info-box">{copy.restoreHint}</div> : null}
+
+        <div className="action-row">
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!backup.storage_path || backup.status !== "succeeded"}
+            onClick={() => downloadBackup(backup)}
+          >
+            {copy.download}
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={saving}
+            onClick={() => void deleteBackup(backup)}
+          >
+            {saving ? copy.deleting : copy.delete}
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!backup.storage_path || backup.status !== "succeeded"}
+            onClick={() => void togglePreview(backup)}
+          >
+            {previewByBackup[backup.id] ? copy.hidePreview : copy.preview}
+          </button>
+        </div>
+
+        {backup.backup_type === "server" ? (
+          <div className="form-grid compact-form-grid">
+            <label className="field">
+              <span>{copy.restoreServer}</span>
+              <select
+                value={restoreTargetByBackup[backup.id] ?? String(backup.server_id ?? "")}
+                onChange={(event) => setRestoreTargetByBackup({ ...restoreTargetByBackup, [backup.id]: event.target.value })}
+              >
+                <option value=""></option>
+                {backupableServers.map((server) => (
+                  <option key={server.id} value={server.id}>
+                    {server.name} ({server.host})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="field field-action">
+              <span>&nbsp;</span>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={saving || backup.status !== "succeeded" || !backup.storage_path}
+                onClick={() => void restoreBackup(backup)}
+              >
+                {saving ? copy.restoring : copy.restore}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="action-row">
+            <button
+              type="button"
+              className="primary-button"
+              disabled={saving || backup.status !== "succeeded" || !backup.storage_path}
+              onClick={() => void restoreBackup(backup)}
+            >
+              {saving ? copy.restoring : copy.restorePanel}
+            </button>
+          </div>
+        )}
+
+        {previewByBackup[backup.id] ? (
+          <div className="info-box">
+            <strong>{copy.previewTitle}</strong>
+            {previewByBackup[backup.id]?.has_panel_dump ? (
+              <div>{locale === "ru" ? "В архиве есть дамп панели." : "Panel dump is present in the archive."}</div>
+            ) : null}
+            {previewByBackup[backup.id]?.has_panel_dump && (previewByBackup[backup.id]?.servers.length ?? 0) === 0 ? (
+              <div>{copy.previewPanelOnly}</div>
+            ) : null}
+            {(previewByBackup[backup.id]?.servers.length ?? 0) === 0 && !previewByBackup[backup.id]?.has_panel_dump ? (
+              <div>{copy.previewNoServers}</div>
+            ) : null}
+            {(previewByBackup[backup.id]?.servers.length ?? 0) > 0 ? (
+              <div>{copy.previewWithServers}</div>
+            ) : null}
+            {previewByBackup[backup.id]?.servers.map((bundledServer) => {
+              const targetKey = `${backup.id}:${bundledServer.server_id}`;
+              return (
+                <div key={targetKey} style={{ marginTop: 12 }}>
+                  <div>
+                    {copy.bundledServer}: {bundledServer.name ?? `#${bundledServer.server_id}`}
+                    {bundledServer.host ? ` (${bundledServer.host})` : ""}
+                  </div>
+                  <div>
+                    {bundledServer.live_interface_name ?? "-"} · {bundledServer.live_config_path ?? "-"}
+                    {bundledServer.has_clients_table ? " · clientsTable" : ""}
+                  </div>
+                  {backup.backup_type === "full" ? (
+                    <div className="form-grid compact-form-grid" style={{ marginTop: 8 }}>
+                      <label className="field">
+                        <span>{copy.restoreServer}</span>
+                        <select
+                          value={bundleTargetByBackup[targetKey] ?? ""}
+                          onChange={(event) => setBundleTargetByBackup({ ...bundleTargetByBackup, [targetKey]: event.target.value })}
+                        >
+                          <option value=""></option>
+                          {backupableServers.map((server) => (
+                            <option key={server.id} value={server.id}>
+                              {server.name} ({server.host})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="field field-action">
+                        <span>&nbsp;</span>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={saving || backup.status !== "succeeded" || !backup.storage_path}
+                          onClick={() => void restoreBundledServer(backup, bundledServer)}
+                        >
+                          {saving ? copy.restoringBundleServer : copy.restoreBundleServer}
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {relatedJob(backup.id) ? (
+          <div className="info-box">
+            {copy.latestJobs}: #{relatedJob(backup.id)?.id} · {relatedJob(backup.id)?.job_type} · {relatedJob(backup.id)?.status}
+          </div>
+        ) : null}
+      </article>
+    );
+  }
+
   return (
     <ProtectedApp>
       <div className="page-header">
@@ -619,175 +796,30 @@ export function BackupsPageClient() {
 
         <div className="panel-card">
           <span className="eyebrow">{copy.eyebrow}</span>
+          <div className="backup-list-head">
+            <div>
+              <h3>{copy.recentBackups}</h3>
+              <p>{backups.length} {copy.archiveCount}</p>
+            </div>
+            {olderBackups.length ? (
+              <button type="button" className="secondary-button" onClick={() => setShowOlderBackups((current) => !current)}>
+                {showOlderBackups ? copy.hideOlderBackups : `${copy.showOlderBackups} (${olderBackups.length})`}
+              </button>
+            ) : null}
+          </div>
           <div className="server-list">
-            {uploadedBackups.length === 0 ? (
+            {backups.length === 0 ? (
               <div className="empty-state">{copy.empty}</div>
             ) : (
-              uploadedBackups.map((backup) => (
-                <article key={backup.id} className="server-card">
-                  <div className="server-card-header">
-                    <div>
-                      <h3>#{backup.id} · {serverLabel(backup.server_id)}</h3>
-                      <p>{copy.createdAt}: {backup.created_at}</p>
-                    </div>
-                    <div className="action-row compact-action-row">
-                      <span className={`status-badge ${
-                        backup.status === "succeeded"
-                          ? "status-succeeded"
-                          : backup.status === "failed"
-                            ? "status-failed"
-                            : "status-pending"
-                      }`}>
-                        {copy.status}: {backup.status}
-                      </span>
-                      <span className="status-badge">{copy.type}: {backup.backup_type}</span>
-                    </div>
+              <>
+                {recentBackups.map((backup) => renderBackupCard(backup))}
+                {olderBackups.length > 0 && showOlderBackups ? (
+                  <div className="backup-older-group">
+                    <div className="backup-older-title">{copy.olderBackups}</div>
+                    {olderBackups.map((backup) => renderBackupCard(backup))}
                   </div>
-
-                  <div className="server-meta">
-                    <span>{copy.source}: {backupSourceLabel(backup)}</span>
-                    <span>{copy.storage}: {backup.storage_path ?? copy.noArchive}</span>
-                    {backup.result_message ? <span>{copy.result}: {backup.result_message}</span> : null}
-                  </div>
-                  <div className="info-box">{copy.restoreHint}</div>
-
-                  <div className="action-row">
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      disabled={!backup.storage_path || backup.status !== "succeeded"}
-                      onClick={() => downloadBackup(backup)}
-                    >
-                      {copy.download}
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      disabled={saving}
-                      onClick={() => void deleteBackup(backup)}
-                    >
-                      {saving ? copy.deleting : copy.delete}
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      disabled={!backup.storage_path || backup.status !== "succeeded"}
-                      onClick={() => void togglePreview(backup)}
-                    >
-                      {previewByBackup[backup.id] ? copy.hidePreview : copy.preview}
-                    </button>
-                  </div>
-
-                  {backup.backup_type === "server" ? (
-                    <div className="form-grid compact-form-grid">
-                      <label className="field">
-                        <span>{copy.restoreServer}</span>
-                        <select
-                          value={restoreTargetByBackup[backup.id] ?? String(backup.server_id ?? "")}
-                          onChange={(event) => setRestoreTargetByBackup({ ...restoreTargetByBackup, [backup.id]: event.target.value })}
-                        >
-                          <option value=""></option>
-                          {backupableServers.map((server) => (
-                            <option key={server.id} value={server.id}>
-                              {server.name} ({server.host})
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <div className="field field-action">
-                        <span>&nbsp;</span>
-                        <button
-                          type="button"
-                          className="primary-button"
-                          disabled={saving || backup.status !== "succeeded" || !backup.storage_path}
-                          onClick={() => void restoreBackup(backup)}
-                        >
-                          {saving ? copy.restoring : copy.restore}
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="action-row">
-                      <button
-                        type="button"
-                        className="primary-button"
-                        disabled={saving || backup.status !== "succeeded" || !backup.storage_path}
-                        onClick={() => void restoreBackup(backup)}
-                      >
-                        {saving ? copy.restoring : copy.restorePanel}
-                      </button>
-                    </div>
-                  )}
-
-                  {previewByBackup[backup.id] ? (
-                    <div className="info-box">
-                      <strong>{copy.previewTitle}</strong>
-                      {previewByBackup[backup.id]?.has_panel_dump ? (
-                        <div>{locale === "ru" ? "В архиве есть дамп панели." : "Panel dump is present in the archive."}</div>
-                      ) : null}
-                      {previewByBackup[backup.id]?.has_panel_dump && (previewByBackup[backup.id]?.servers.length ?? 0) === 0 ? (
-                        <div>{copy.previewPanelOnly}</div>
-                      ) : null}
-                      {(previewByBackup[backup.id]?.servers.length ?? 0) === 0 && !previewByBackup[backup.id]?.has_panel_dump ? (
-                        <div>{copy.previewNoServers}</div>
-                      ) : null}
-                      {(previewByBackup[backup.id]?.servers.length ?? 0) > 0 ? (
-                        <div>{copy.previewWithServers}</div>
-                      ) : null}
-                      {previewByBackup[backup.id]?.servers.map((bundledServer) => {
-                        const targetKey = `${backup.id}:${bundledServer.server_id}`;
-                        return (
-                          <div key={targetKey} style={{ marginTop: 12 }}>
-                            <div>
-                              {copy.bundledServer}: {bundledServer.name ?? `#${bundledServer.server_id}`}
-                              {bundledServer.host ? ` (${bundledServer.host})` : ""}
-                            </div>
-                            <div>
-                              {bundledServer.live_interface_name ?? "-"} · {bundledServer.live_config_path ?? "-"}
-                              {bundledServer.has_clients_table ? " · clientsTable" : ""}
-                            </div>
-                            {backup.backup_type === "full" ? (
-                              <div className="form-grid compact-form-grid" style={{ marginTop: 8 }}>
-                                <label className="field">
-                                  <span>{copy.restoreServer}</span>
-                                  <select
-                                    value={bundleTargetByBackup[targetKey] ?? ""}
-                                    onChange={(event) => setBundleTargetByBackup({ ...bundleTargetByBackup, [targetKey]: event.target.value })}
-                                  >
-                                    <option value=""></option>
-                                    {backupableServers.map((server) => (
-                                      <option key={server.id} value={server.id}>
-                                        {server.name} ({server.host})
-                                      </option>
-                                    ))}
-                                  </select>
-                                </label>
-                                <div className="field field-action">
-                                  <span>&nbsp;</span>
-                                  <button
-                                    type="button"
-                                    className="secondary-button"
-                                    disabled={saving || backup.status !== "succeeded" || !backup.storage_path}
-                                    onClick={() => void restoreBundledServer(backup, bundledServer)}
-                                  >
-                                    {saving ? copy.restoringBundleServer : copy.restoreBundleServer}
-                                  </button>
-                                </div>
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : null}
-
-                  {relatedJob(backup.id) ? (
-                    <div className="info-box">
-                      {copy.latestJobs}: #{relatedJob(backup.id)?.id} · {relatedJob(backup.id)?.job_type} · {relatedJob(backup.id)?.status}
-                    </div>
-                  ) : null}
-                </article>
-              ))
+                ) : null}
+              </>
             )}
           </div>
         </div>

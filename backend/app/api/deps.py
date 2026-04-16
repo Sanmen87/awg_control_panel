@@ -1,4 +1,4 @@
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
@@ -7,7 +7,10 @@ from app.core.config import settings
 from app.core.security import ALGORITHM
 from app.db.session import get_db
 from app.models.agent_node import AgentNode
+from app.models.api_token import ApiToken
 from app.models.user import User
+from app.services.app_settings import AppSettingsService
+from app.services.api_tokens import ApiTokenService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.api_v1_prefix}/auth/login")
 
@@ -40,3 +43,26 @@ def get_current_agent(
     if agent is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid agent token")
     return agent
+
+
+def get_current_api_token(
+    request: Request,
+    authorization: str | None = Header(None, alias="Authorization"),
+    x_api_token: str | None = Header(None, alias="X-API-Token"),
+    db: Session = Depends(get_db),
+) -> ApiToken:
+    raw_token = x_api_token
+    if not raw_token and authorization:
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer" and value:
+            raw_token = value.strip()
+    if not raw_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API token")
+    if not AppSettingsService().get_web_settings(db).external_api_enabled:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="External API is disabled")
+
+    client_ip = request.client.host if request.client else None
+    token = ApiTokenService().authenticate(db, raw_token, client_ip=client_ip)
+    if token is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API token")
+    return token

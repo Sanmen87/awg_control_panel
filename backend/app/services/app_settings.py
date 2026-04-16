@@ -39,6 +39,7 @@ class WebSettingsPayload:
     public_domain: str | None = None
     admin_email: str | None = None
     web_mode: str = "http"
+    external_api_enabled: bool = False
 
 
 class AppSettingsService:
@@ -77,6 +78,7 @@ class AppSettingsService:
         "web_public_domain": False,
         "web_admin_email": False,
         "web_mode": False,
+        "web_external_api_enabled": False,
     }
 
     def _get_setting(self, db: Session, key: str) -> AppSetting | None:
@@ -172,6 +174,7 @@ class AppSettingsService:
             public_domain=(values["web_public_domain"] or "").strip() or None,
             admin_email=(values["web_admin_email"] or "").strip() or None,
             web_mode=mode,
+            external_api_enabled=self._bool(values["web_external_api_enabled"]),
         )
 
     def update_web_settings(self, db: Session, payload: WebSettingsPayload) -> WebSettingsPayload:
@@ -184,6 +187,7 @@ class AppSettingsService:
             "web_public_domain": payload.public_domain,
             "web_admin_email": payload.admin_email,
             "web_mode": payload.web_mode,
+            "web_external_api_enabled": "true" if payload.external_api_enabled else "false",
         }
         for key in self.WEB_KEYS:
             setting = self._get_setting(db, key) or AppSetting(key=key, is_encrypted=False)

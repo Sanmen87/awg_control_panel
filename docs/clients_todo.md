@@ -173,6 +173,24 @@
 - HTTP requests sent to server IP or unknown host are redirected to the configured canonical domain
 - Panel web exposure is now a first-class path, no longer just a side setting under delivery/integrations
 
+### External API
+
+- External API is exposed as a dedicated service-token integration surface.
+- Web / HTTPS page can enable or disable `/api/v1/external/*`.
+- Web / HTTPS page can generate or rotate the default external API token.
+- Admin-issued scoped API tokens are supported through `/api/v1/api-tokens`.
+- Topology-aware external client targets are available.
+- External managed client creation now works only by topology:
+  - simple topology
+  - proxy + exit topology
+- Proxy topology create automatically uses the proxy node as the real create server.
+- Proxy topology create supports default-exit selection when `exit_server_id` is omitted.
+- External API can return configs in the create response with `?include_materials=true`.
+- External API can also fetch configs separately through the materials endpoint.
+- External API supports client suspend, resume, delete, and generated-material read actions.
+- External API actions are written to audit logs with actor type `api_token`.
+- `docs/externalapi.md` contains the usage guide and examples.
+
 ### Security
 
 - Built-in anti-bruteforce login guard backed by Redis.
@@ -366,7 +384,7 @@
 
 ### API And Integrations
 
-- Expand REST API for external JWT-authenticated integrations.
+- Expand REST API for external service-token integrations.
 - Support automated client creation and issuance outside the web UI.
 - Support integration scenarios such as:
   - HR onboarding / offboarding

@@ -12,15 +12,31 @@ from app.schemas.settings import (
     DeliverySettingsUpdate,
     DeliveryTestResult,
     WebApplyResult,
+    WebExternalApiTokenResult,
     WebSettingsRead,
     WebSettingsUpdate,
     WebStatusRead,
 )
 from app.services.app_settings import AppSettingsService, BackupSettingsPayload, DeliverySettingsPayload, WebSettingsPayload
+from app.services.api_tokens import ApiTokenService
+from app.services.audit import AuditService
 from app.services.delivery import DeliveryService
 from app.services.web_https import WebHttpsApplyService, WebHttpsService
 
 router = APIRouter()
+
+WEB_EXTERNAL_API_SCOPES = ["servers:read", "clients:read", "clients:write", "materials:read"]
+
+
+def _web_settings_read_payload(db: Session, payload: WebSettingsPayload) -> dict[str, object]:
+    token_service = ApiTokenService()
+    api_token = token_service.get_web_external_token(db)
+    return WebHttpsService().build_read_payload(
+        payload,
+        external_api_token_configured=api_token is not None,
+        external_api_token_prefix=api_token.token_prefix if api_token else None,
+        external_api_token_scopes=token_service.scopes_for(api_token) if api_token else [],
+    )
 
 
 @router.get("/delivery", response_model=DeliverySettingsRead)
@@ -132,7 +148,7 @@ def get_web_settings(
     _: User = Depends(get_current_user),
 ) -> WebSettingsRead:
     payload = AppSettingsService().get_web_settings(db)
-    return WebSettingsRead(**WebHttpsService().build_read_payload(payload))
+    return WebSettingsRead(**_web_settings_read_payload(db, payload))
 
 
 @router.patch("/web", response_model=WebSettingsRead)
@@ -147,9 +163,37 @@ def update_web_settings(
             public_domain=(update.public_domain or "").strip() or None,
             admin_email=(update.admin_email or "").strip() or None,
             web_mode=(update.web_mode or "http").strip().lower(),
+            external_api_enabled=update.external_api_enabled,
         ),
     )
-    return WebSettingsRead(**WebHttpsService().build_read_payload(payload))
+    return WebSettingsRead(**_web_settings_read_payload(db, payload))
+
+
+@router.post("/web/external-api-token", response_model=WebExternalApiTokenResult)
+def generate_web_external_api_token(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> WebExternalApiTokenResult:
+    service = ApiTokenService()
+    api_token, raw_token = service.rotate_named_token(
+        db,
+        name=service.WEB_EXTERNAL_TOKEN_NAME,
+        scopes=WEB_EXTERNAL_API_SCOPES,
+    )
+    AuditService().log_user(
+        db,
+        current_user,
+        action="external_api.token_rotated",
+        resource_type="api_token",
+        resource_id=str(api_token.id),
+        details="Web external API token generated from Web / HTTPS settings",
+    )
+    return WebExternalApiTokenResult(
+        token=raw_token,
+        token_prefix=api_token.token_prefix,
+        scopes=service.scopes_for(api_token),
+        detail="External API token generated. Store it now; it will not be shown again.",
+    )
 
 
 @router.get("/web/status", response_model=WebStatusRead)
@@ -173,6 +217,7 @@ def apply_web_settings(
             public_domain=(update.public_domain or "").strip() or None,
             admin_email=(update.admin_email or "").strip() or None,
             web_mode=(update.web_mode or "http").strip().lower(),
+            external_api_enabled=update.external_api_enabled,
         ),
     )
     try:
